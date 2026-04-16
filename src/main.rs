@@ -1,3 +1,7 @@
+mod font;
+mod jitter;
+mod svg;
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -76,21 +80,35 @@ fn main() {
     match cli.command {
         Commands::Render {
             text,
-            font,
+            font: font_path,
             output,
             intensity,
             size,
         } => {
+            let (glyphs, units_per_em) = match font::load_glyphs(&font_path, &text) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let commands: Vec<Vec<font::PathCommand>> =
+                glyphs.iter().map(|g| g.commands.clone()).collect();
+            let jittered = jitter::apply_jitter(&commands, intensity, size as f64);
+            let svg_output = svg::render_svg(&glyphs, &jittered, size, units_per_em);
+
+            if let Err(e) = std::fs::write(&output, &svg_output) {
+                eprintln!("Error writing output: {e}");
+                std::process::exit(1);
+            }
+
             println!(
-                "Rendering \"{}\" with font {} (size: {}, intensity: {}) -> {}",
+                "Rendered \"{}\" -> {} ({} bytes)",
                 text,
-                font.display(),
-                size,
-                intensity,
-                output.display()
+                output.display(),
+                svg_output.len()
             );
-            eprintln!("render mode is not yet implemented");
-            std::process::exit(1);
         }
         Commands::Bake {
             input,
