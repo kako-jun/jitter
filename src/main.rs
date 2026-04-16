@@ -26,7 +26,7 @@ enum Commands {
         output: PathBuf,
 
         /// Variation intensity (0.0 to 1.0)
-        #[arg(short, long, default_value = "0.5")]
+        #[arg(short, long, default_value = "0.5", value_parser = parse_intensity)]
         intensity: f64,
 
         /// Font size in pixels
@@ -43,13 +43,31 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Number of alternate glyphs per character
-        #[arg(short, long, default_value = "3")]
+        #[arg(short, long, default_value = "3", value_parser = parse_alternates)]
         alternates: u32,
 
         /// Variation intensity (0.0 to 1.0)
-        #[arg(short, long, default_value = "0.5")]
+        #[arg(short, long, default_value = "0.5", value_parser = parse_intensity)]
         intensity: f64,
     },
+}
+
+fn parse_alternates(s: &str) -> Result<u32, String> {
+    let v: u32 = s.parse().map_err(|e| format!("{e}"))?;
+    if v >= 1 {
+        Ok(v)
+    } else {
+        Err("alternates must be at least 1".to_string())
+    }
+}
+
+fn parse_intensity(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("intensity must be between 0.0 and 1.0, got {v}"))
+    }
 }
 
 fn main() {
@@ -64,7 +82,7 @@ fn main() {
             size,
         } => {
             println!(
-                "Rendering \"{}\" with font {:?} (size: {}, intensity: {}) -> {:?}",
+                "Rendering \"{}\" with font {} (size: {}, intensity: {}) -> {}",
                 text,
                 font.display(),
                 size,
@@ -81,12 +99,12 @@ fn main() {
             intensity,
         } => {
             let output = output.unwrap_or_else(|| {
-                let stem = input.file_stem().unwrap().to_str().unwrap();
-                let ext = input.extension().unwrap().to_str().unwrap();
+                let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("font");
+                let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("ttf");
                 input.with_file_name(format!("{stem}-jittered.{ext}"))
             });
             println!(
-                "Baking {:?} with {} alternates (intensity: {}) -> {:?}",
+                "Baking {} with {} alternates (intensity: {}) -> {}",
                 input.display(),
                 alternates,
                 intensity,
