@@ -45,16 +45,15 @@ jitter's key advantage is that it works with any existing font and requires zero
 
 ```
 CLI (clap)
-├── render: text + font -> SVG/PNG
-│   ├── Font loading (ttf-parser or similar)
-│   ├── Glyph extraction
-│   ├── Per-character transform generation (RNG)
-│   └── Output rendering (SVG writer / rasterizer)
-└── bake: font -> font
-    ├── Font loading
+├── render: text + font -> SVG
+│   ├── font.rs — Font loading & glyph outline extraction (skrifa)
+│   ├── jitter.rs — Per-character random transforms (rotation, scale, offset)
+│   └── svg.rs — SVG output (font coords → SVG coords, path generation)
+└── bake: font -> font (not yet implemented)
+    ├── Font loading (skrifa)
     ├── Glyph duplication with transforms
     ├── calt feature table generation
-    └── Font serialization
+    └── Font serialization (write-fonts)
 ```
 
 ## Future integration
