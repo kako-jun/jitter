@@ -19,7 +19,7 @@ Each character gets independent random variation in:
 - **Rotation**: slight tilt (e.g. -3 to +3 degrees)
 - **Scale**: minor size changes (e.g. 0.95x to 1.05x)
 - **Position offset**: vertical and horizontal drift
-- **Stroke weight**: subtle thickness variation (SVG only)
+- **Stroke weight**: subtle thickness variation (future)
 
 The `intensity` parameter (0.0 to 1.0) controls how much variation is applied. At 0.0, output is identical to the original font. At 1.0, maximum variation is applied.
 
@@ -45,16 +45,15 @@ jitter's key advantage is that it works with any existing font and requires zero
 
 ```
 CLI (clap)
-├── render: text + font -> SVG/PNG
-│   ├── Font loading (ttf-parser or similar)
-│   ├── Glyph extraction
-│   ├── Per-character transform generation (RNG)
-│   └── Output rendering (SVG writer / rasterizer)
-└── bake: font -> font
-    ├── Font loading
+├── render: text + font -> SVG
+│   ├── font.rs — Font loading & glyph outline extraction (skrifa)
+│   ├── jitter.rs — Per-character random transforms (rotation, scale, offset)
+│   └── svg.rs — SVG output (font coords → SVG coords, path generation)
+└── bake: font -> font (not yet implemented)
+    ├── Font loading (skrifa)
     ├── Glyph duplication with transforms
     ├── calt feature table generation
-    └── Font serialization
+    └── Font serialization (write-fonts)
 ```
 
 ## Future integration
