@@ -25,7 +25,7 @@ enum Commands {
         #[arg(short, long)]
         font: PathBuf,
 
-        /// Output file path (.svg or .png)
+        /// Output file path (.svg)
         #[arg(short, long, default_value = "output.svg")]
         output: PathBuf,
 
@@ -85,6 +85,11 @@ fn main() {
             intensity,
             size,
         } => {
+            if text.is_empty() {
+                eprintln!("Error: text must not be empty");
+                std::process::exit(1);
+            }
+
             let (glyphs, units_per_em) = match font::load_glyphs(&font_path, &text) {
                 Ok(v) => v,
                 Err(e) => {
@@ -95,7 +100,7 @@ fn main() {
 
             let commands: Vec<Vec<font::PathCommand>> =
                 glyphs.iter().map(|g| g.commands.clone()).collect();
-            let jittered = jitter::apply_jitter(&commands, intensity, size as f64);
+            let jittered = jitter::apply_jitter(&commands, intensity, units_per_em as f64);
             let svg_output = svg::render_svg(&glyphs, &jittered, size, units_per_em);
 
             if let Err(e) = std::fs::write(&output, &svg_output) {

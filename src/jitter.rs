@@ -11,32 +11,79 @@ struct GlyphTransform {
     dy: f64,
     /// Scale factor
     scale: f64,
+    /// Glyph center X (for rotation/scale pivot)
+    cx: f64,
+    /// Glyph center Y (for rotation/scale pivot)
+    cy: f64,
 }
 
 /// Apply jitter transformations to a list of path command sets (one per glyph).
 ///
 /// Each glyph gets a random rotation, position offset, and scale variation.
 /// The `intensity` parameter (0.0-1.0) controls the magnitude of the variation.
-/// `font_size` is used to scale the position offset.
+/// `units_per_em` is used to scale the position offset relative to glyph size.
 pub fn apply_jitter(
     glyph_commands: &[Vec<PathCommand>],
     intensity: f64,
-    font_size: f64,
+    units_per_em: f64,
 ) -> Vec<Vec<PathCommand>> {
     let mut rng = rand::thread_rng();
 
     glyph_commands
         .iter()
         .map(|commands| {
+            let (cx, cy) = compute_center(commands);
             let transform = GlyphTransform {
                 angle: rng.gen_range(-5.0..5.0_f64).to_radians() * intensity,
-                dx: rng.gen_range(-1.0..1.0) * font_size * 0.05 * intensity,
-                dy: rng.gen_range(-1.0..1.0) * font_size * 0.05 * intensity,
+                dx: rng.gen_range(-1.0..1.0) * units_per_em * 0.03 * intensity,
+                dy: rng.gen_range(-1.0..1.0) * units_per_em * 0.03 * intensity,
                 scale: 1.0 + rng.gen_range(-0.05..0.05) * intensity,
+                cx,
+                cy,
             };
             apply_transform(commands, &transform)
         })
         .collect()
+}
+
+/// Compute the bounding box center of a set of path commands.
+fn compute_center(commands: &[PathCommand]) -> (f64, f64) {
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+
+    for cmd in commands {
+        let points: Vec<(f64, f64)> = match cmd {
+            PathCommand::MoveTo(x, y) | PathCommand::LineTo(x, y) => {
+                vec![(*x as f64, *y as f64)]
+            }
+            PathCommand::QuadTo(cx, cy, x, y) => {
+                vec![(*cx as f64, *cy as f64), (*x as f64, *y as f64)]
+            }
+            PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => {
+                vec![
+                    (*cx0 as f64, *cy0 as f64),
+                    (*cx1 as f64, *cy1 as f64),
+                    (*x as f64, *y as f64),
+                ]
+            }
+            PathCommand::Close => vec![],
+        };
+
+        for (x, y) in points {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    if min_x == f64::MAX {
+        (0.0, 0.0)
+    } else {
+        ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+    }
 }
 
 fn apply_transform(commands: &[PathCommand], t: &GlyphTransform) -> Vec<PathCommand> {
@@ -74,16 +121,19 @@ fn apply_transform(commands: &[PathCommand], t: &GlyphTransform) -> Vec<PathComm
         .collect()
 }
 
-/// Apply scale, rotation, and translation to a point.
+/// Apply scale, rotation (around glyph center), and translation to a point.
 fn transform_point(x: f64, y: f64, t: &GlyphTransform) -> (f64, f64) {
+    // Translate to glyph center
+    let dx = x - t.cx;
+    let dy = y - t.cy;
     // Scale
-    let x = x * t.scale;
-    let y = y * t.scale;
+    let dx = dx * t.scale;
+    let dy = dy * t.scale;
     // Rotate
     let cos = t.angle.cos();
     let sin = t.angle.sin();
-    let rx = x * cos - y * sin;
-    let ry = x * sin + y * cos;
-    // Translate
-    (rx + t.dx, ry + t.dy)
+    let rx = dx * cos - dy * sin;
+    let ry = dx * sin + dy * cos;
+    // Translate back and apply position offset
+    (rx + t.cx + t.dx, ry + t.cy + t.dy)
 }
