@@ -1,5 +1,7 @@
 mod font;
 mod jitter;
+mod layout;
+mod png;
 mod svg;
 
 use clap::{Parser, Subcommand};
@@ -25,7 +27,7 @@ enum Commands {
         #[arg(short, long)]
         font: PathBuf,
 
-        /// Output file path (.svg)
+        /// Output file path (.svg or .png)
         #[arg(short, long, default_value = "output.svg")]
         output: PathBuf,
 
@@ -106,24 +108,59 @@ fn main() {
             let commands: Vec<Vec<font::PathCommand>> =
                 glyphs.iter().map(|g| g.commands.clone()).collect();
             let jittered = jitter::apply_jitter(&commands, intensity, units_per_em as f64, seed);
-            let svg_output = svg::render_svg(&glyphs, &jittered, size, units_per_em);
-
-            if let Err(e) = std::fs::write(&output, &svg_output) {
-                eprintln!("Error writing output: {e}");
-                std::process::exit(1);
-            }
 
             let seed_note = match seed {
                 Some(s) => format!(" (seed: {s})"),
                 None => String::new(),
             };
-            println!(
-                "Rendered \"{}\" -> {} ({} bytes){}",
-                text,
-                output.display(),
-                svg_output.len(),
-                seed_note
-            );
+
+            let ext = output.extension();
+            let is_svg = ext.is_none() || ext.is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+            let is_png = ext.is_some_and(|e| e.eq_ignore_ascii_case("png"));
+
+            if is_svg {
+                let svg_output = svg::render_svg(&glyphs, &jittered, size, units_per_em);
+
+                if let Err(e) = std::fs::write(&output, &svg_output) {
+                    eprintln!("Error writing output: {e}");
+                    std::process::exit(1);
+                }
+
+                println!(
+                    "Rendered \"{}\" -> {} ({} bytes){}",
+                    text,
+                    output.display(),
+                    svg_output.len(),
+                    seed_note
+                );
+            } else if is_png {
+                let png_bytes = match png::render_png(&glyphs, &jittered, size, units_per_em) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("Error rendering PNG: {e}");
+                        std::process::exit(1);
+                    }
+                };
+
+                if let Err(e) = std::fs::write(&output, &png_bytes) {
+                    eprintln!("Error writing output: {e}");
+                    std::process::exit(1);
+                }
+
+                println!(
+                    "Rendered \"{}\" -> {} ({} bytes){}",
+                    text,
+                    output.display(),
+                    png_bytes.len(),
+                    seed_note
+                );
+            } else {
+                let lossy = ext
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                eprintln!("Error: unsupported output extension: .{lossy} (supported: .svg, .png)");
+                std::process::exit(1);
+            }
         }
         Commands::Bake {
             input,

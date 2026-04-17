@@ -10,10 +10,11 @@ Digital fonts produce identical glyphs every time the same character appears. Re
 
 ### render
 
-Takes text and a font file, applies per-character random transformations (rotation, scale, offset), and outputs an SVG.
+Takes text and a font file, applies per-character random transformations (rotation, scale, offset), and outputs an SVG or PNG (auto-detected from the `--output` extension).
 
 ```
 jitter render "Hello, world!" --font my-font.ttf --output hello.svg
+jitter render "Hello, world!" --font my-font.ttf --output hello.png
 jitter render "手書き風" --font noto-sans-jp.otf --output tegaki.svg --intensity 0.8 --size 64
 jitter render "reproducible" --font my-font.ttf --seed 42
 ```
@@ -43,7 +44,7 @@ jitter bake <INPUT> [--output <FILE>] [--alternates <N>] [--intensity <0.0-1.0>]
 ### Options
 
 - `--font`, `-f`: Path to a .ttf or .otf font file
-- `--output`, `-o`: Output file path (default: `output.svg` for render)
+- `--output`, `-o`: Output file path (default: `output.svg`). Format is auto-detected from the extension (`.svg` or `.png`, render mode only).
 - `--intensity`, `-i`: How much variation to apply, from 0.0 (none) to 1.0 (maximum)
 - `--size`, `-s`: Font size in pixels (render mode only, default: 48)
 - `--seed`: Random seed (u64) for reproducible output. When omitted, output is non-deterministic (render mode only)
@@ -52,6 +53,7 @@ jitter bake <INPUT> [--output <FILE>] [--alternates <N>] [--intensity <0.0-1.0>]
 ## Output formats
 
 - **SVG**: Vector output, scalable, editable.
+- **PNG**: Rasterized output with transparent background (8-bit RGBA). Chosen automatically when the `--output` path ends in `.png`.
 
 ## Roadmap
 
