@@ -13,7 +13,7 @@ jitter applies per-character random transformations to text, producing output th
 ### render mode
 
 Input: text string + font file (.ttf/.otf)
-Output: SVG or PNG image
+Output: SVG or PNG image (auto-selected from the `--output` file extension; PNG uses a transparent background)
 
 Each character gets independent random variation in:
 - **Rotation**: slight tilt (e.g. -3 to +3 degrees)
@@ -47,10 +47,11 @@ jitter's key advantage is that it works with any existing font and requires zero
 
 ```
 CLI (clap)
-├── render: text + font -> SVG
+├── render: text + font -> SVG or PNG (by --output extension)
 │   ├── font.rs — Font loading & glyph outline extraction (skrifa)
 │   ├── jitter.rs — Per-character random transforms (rotation, scale, offset)
-│   └── svg.rs — SVG output (font coords → SVG coords, path generation)
+│   ├── svg.rs — SVG output (font coords → SVG coords, path generation)
+│   └── png.rs — PNG output (tiny-skia rasterizer, transparent background)
 └── bake: font -> font (not yet implemented)
     ├── Font loading (skrifa)
     ├── Glyph duplication with transforms
