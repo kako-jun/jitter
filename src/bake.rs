@@ -2,12 +2,17 @@
 //!
 //! Phase A scope:
 //! - Input is TTF only (OTF / CFF / CFF2 is rejected).
-//! - For each non-empty simple glyph, N alternates are created by re-running
-//!   jitter, then registered in a minimal GSUB table using the `rand` feature
-//!   (OpenType 1.8) with AlternateSubstFormat1.
-//! - Composite glyphs and empty glyphs are copied through without alternates.
-//! - Tables not related to glyph identity (name, OS/2, post, cmap, ...) are
-//!   copied from the input font verbatim.
+//! - For each non-empty simple glyph (excluding `.notdef`), N alternates are
+//!   created by re-running jitter, then registered in a minimal GSUB table
+//!   using the `rand` feature (OpenType 1.8) with AlternateSubstFormat1.
+//! - `.notdef` (gid 0) is preserved unchanged and excluded from alternates.
+//! - Composite glyphs are consumed via skrifa's pen and re-emitted as flat
+//!   simple glyphs (structure flattened, visual appearance preserved).
+//! - Cubic-bearing glyphs (non-TrueType outlines surfaced by skrifa) are
+//!   passed through without alternates; a warning is printed.
+//! - Most tables (name, OS/2, cmap, ...) are copied from the input font
+//!   verbatim. `post` is downgraded to format 3.0 because the glyph count
+//!   changed and the original format 2 glyph-name index would be stale.
 //!
 //! Shapers that honour the `rand` feature will pick a random alternate each
 //! time the glyph is laid out, producing the handwriting-like variation baked
@@ -39,6 +44,8 @@ use write_fonts::tables::layout::{
     LookupFlag, LookupList, Script, ScriptList, ScriptRecord,
 };
 use write_fonts::tables::maxp::Maxp;
+use write_fonts::tables::post::Post;
+use write_fonts::types::Version16Dot16;
 use write_fonts::FontBuilder;
 
 /// Bake jitter variation into a font file.
@@ -67,16 +74,16 @@ pub fn bake_font(
         Err(e) => return Err(format!("Failed to parse font: {e}")),
     };
 
-    // Reject OTF / CFF / CFF2. Phase A is TTF-only.
-    if !is_ttf(&font_data)? {
-        return Err("OTF/CFF fonts are not yet supported (TTF only)".to_string());
-    }
-
     // Parse the same bytes through write-fonts' read-fonts to satisfy the
     // builder's type expectations (the two read-fonts versions are distinct
     // types in the dependency graph even though the wire format is the same).
     let wf_font =
         WfFontRef::new(&font_data).map_err(|e| format!("Failed to re-parse font: {e}"))?;
+
+    // Reject OTF / CFF / CFF2. Phase A is TTF-only.
+    if !is_ttf(&wf_font) {
+        return Err("OTF/CFF fonts are not yet supported (TTF only)".to_string());
+    }
 
     let num_glyphs = skrifa_font
         .maxp()
@@ -88,15 +95,12 @@ pub fn bake_font(
         .units_per_em() as f64;
 
     let outlines = skrifa_font.outline_glyphs();
-    let location = skrifa_font.axes().location::<&[(&str, f32)]>(&[]);
-    let glyph_metrics = skrifa_font.glyph_metrics(Size::unscaled(), &location);
 
-    // Extract each original glyph's outline + advance.
+    // Extract each original glyph's outline.
     // `originals[i]` is the source for gid=i.
     let mut originals: Vec<OriginalGlyph> = Vec::with_capacity(num_glyphs as usize);
     for gid_u16 in 0..num_glyphs {
         let gid = GlyphId::new(gid_u16 as u32);
-        let advance = glyph_metrics.advance_width(gid).unwrap_or(0.0);
 
         let outline = outlines.get(gid);
         let (commands, is_simple) = if let Some(glyph) = outline {
@@ -109,9 +113,14 @@ pub fn bake_font(
             (Vec::new(), true)
         };
 
+        if !is_simple {
+            eprintln!(
+                "jitter: glyph {gid_u16} contains cubic curves; keeping original and skipping alternates"
+            );
+        }
+
         originals.push(OriginalGlyph {
             commands,
-            advance,
             is_simple,
         });
     }
@@ -142,6 +151,8 @@ pub fn bake_font(
     .map_err(|e| format!("Failed to read hmtx: {e}"))?;
 
     // Originals pass: build Glyph + LongMetric for each gid.
+    // For cubic-bearing (is_simple=false) glyphs we still emit a placeholder
+    // (Glyph::Empty) so the gid stays valid; the warning above surfaces this.
     for (gid, orig) in originals.iter().enumerate() {
         let glyph = build_simple_glyph(&orig.commands, orig.is_simple)?;
         new_glyphs.push(glyph);
@@ -150,24 +161,29 @@ pub fn bake_font(
         new_metrics.push(LongMetric::new(advance, lsb));
     }
 
-    // Alternates pass: only for non-empty simple glyphs.
+    // Alternates pass: only for non-empty simple glyphs, and never for .notdef (gid 0).
     let mut next_gid: u32 = num_glyphs as u32;
     for gid in 0..num_glyphs as usize {
+        if gid == 0 {
+            // .notdef is the fallback glyph; do not vary it.
+            continue;
+        }
         let orig = &originals[gid];
         if !orig.is_simple || orig.commands.is_empty() {
             continue;
         }
         for _ in 0..alternates {
+            // Guard against u16 overflow before allocating a new gid.
+            if next_gid > u16::MAX as u32 {
+                return Err(format!(
+                    "Too many glyphs after baking: {} exceeds {}",
+                    next_gid,
+                    u16::MAX
+                ));
+            }
+
             // Run jitter once per alternate to get a fresh variation.
-            let jittered = jitter::apply_jitter(
-                std::slice::from_ref(&orig.commands),
-                intensity,
-                units_per_em,
-                None,
-            )
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+            let jittered = jitter::apply_jitter_one(&orig.commands, intensity, units_per_em);
 
             let glyph = build_simple_glyph(&jittered, true)?;
             new_glyphs.push(glyph);
@@ -176,19 +192,14 @@ pub fn bake_font(
             let lsb = new_metrics[gid].side_bearing;
             new_metrics.push(LongMetric::new(advance, lsb));
 
-            if next_gid > u16::MAX as u32 {
-                return Err(format!(
-                    "Too many glyphs after baking: {} exceeds {}",
-                    next_gid,
-                    u16::MAX
-                ));
-            }
             alt_map[gid].push(next_gid as u16);
             next_gid += 1;
         }
     }
 
     let total_glyphs = new_glyphs.len();
+    // total_glyphs is always <= next_gid, which was bounded above, but keep a
+    // defensive check so the cast is always sound.
     if total_glyphs > u16::MAX as usize {
         return Err(format!(
             "Too many glyphs after baking: {} exceeds {}",
@@ -232,13 +243,19 @@ pub fn bake_font(
 
     let hmtx = Hmtx::new(new_metrics, Vec::new());
 
+    // Build a post table downgraded to format 3.0. The original post may have
+    // been format 2.0 with a glyph_name_index sized for the pre-bake glyph
+    // count, which would be inconsistent with the new maxp.num_glyphs. Format
+    // 3.0 stores no glyph names, so it is always consistent.
+    let post = build_post_v3(&wf_font)?;
+
     // Build a minimal GSUB: script DFLT / langsys dflt / feature rand / AlternateSubst lookup.
     let gsub = build_gsub(&alt_map)?;
 
     // Assemble the FontBuilder. We add the rebuilt tables first, then call
     // `copy_missing_tables` — which only inserts tables we haven't added — so
-    // the originals (name, OS/2, post, cmap, ...) come through untouched
-    // while our replacements win.
+    // the originals (name, OS/2, cmap, ...) come through untouched while our
+    // replacements (including the format-3 post) win.
     let mut builder = FontBuilder::new();
     builder
         .add_table(&head)
@@ -253,41 +270,105 @@ pub fn bake_font(
         .map_err(|e| format!("glyf: {e}"))?
         .add_table(&loca_table)
         .map_err(|e| format!("loca: {e}"))?
+        .add_table(&post)
+        .map_err(|e| format!("post: {e}"))?
         .add_table(&gsub)
         .map_err(|e| format!("GSUB: {e}"))?;
     builder.copy_missing_tables(wf_font);
 
     let out = builder.build();
 
-    // Sanity: verify the output at least re-parses.
-    if WfFontRef::new(&out).is_err() {
-        return Err("Produced font failed to re-parse".to_string());
-    }
+    // Sanity: verify the output re-parses and has consistent counts.
+    verify_baked_font(&out, total_glyphs_u16)?;
 
     std::fs::write(output_path, &out).map_err(|e| format!("Failed to write output: {e}"))?;
 
     Ok(())
 }
 
-/// Detect whether a font is a TTF (has `glyf` / `loca`, no `CFF ` / `CFF2`).
-fn is_ttf(data: &[u8]) -> Result<bool, String> {
-    let font =
-        WfFontRef::new(data).map_err(|e| format!("Failed to parse font for format check: {e}"))?;
-    let has_glyf = font.table_data(Tag::new(b"glyf")).is_some();
-    let has_cff = font.table_data(Tag::new(b"CFF ")).is_some()
-        || font.table_data(Tag::new(b"CFF2")).is_some();
-    Ok(has_glyf && !has_cff)
+/// Verify that a freshly-baked font is internally consistent.
+///
+/// Re-parses via skrifa and checks that `maxp.num_glyphs` and the hmtx
+/// long-metric count match the value we wrote.
+fn verify_baked_font(data: &[u8], expected_num_glyphs: u16) -> Result<(), String> {
+    // Re-parse through write-fonts (cheap consistency check).
+    if WfFontRef::new(data).is_err() {
+        return Err("bake produced a font that failed write-fonts re-parse".to_string());
+    }
+
+    // Re-parse through skrifa too (goes through a different read-fonts copy
+    // so this exercises both code paths).
+    let file = skrifa::raw::FileRef::new(data)
+        .map_err(|e| format!("bake produced a font that failed skrifa re-parse: {e}"))?;
+    let font = match file {
+        skrifa::raw::FileRef::Font(f) => f,
+        skrifa::raw::FileRef::Collection(_) => {
+            return Err("bake produced a collection, expected a single font".to_string())
+        }
+    };
+
+    let num_glyphs = font
+        .maxp()
+        .map_err(|e| format!("bake produced font whose maxp is unreadable: {e}"))?
+        .num_glyphs();
+    if num_glyphs != expected_num_glyphs {
+        return Err(format!(
+            "bake produced inconsistent font: maxp.num_glyphs={num_glyphs}, expected {expected_num_glyphs}"
+        ));
+    }
+
+    let hhea = font
+        .hhea()
+        .map_err(|e| format!("bake produced font whose hhea is unreadable: {e}"))?;
+    let num_long_metrics = hhea.number_of_long_metrics();
+    if num_long_metrics != expected_num_glyphs {
+        return Err(format!(
+            "bake produced inconsistent font: hhea.number_of_long_metrics={num_long_metrics}, expected {expected_num_glyphs}"
+        ));
+    }
+
+    let hmtx = font
+        .hmtx()
+        .map_err(|e| format!("bake produced font whose hmtx is unreadable: {e}"))?;
+    let actual_h_metrics = hmtx.h_metrics().len();
+    if actual_h_metrics != expected_num_glyphs as usize {
+        return Err(format!(
+            "bake produced inconsistent font: hmtx.h_metrics.len={actual_h_metrics}, expected {expected_num_glyphs}"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Detect whether a font is a TTF (has `glyf`, no `CFF ` / `CFF2`).
+fn is_ttf(wf_font: &WfFontRef<'_>) -> bool {
+    let has_glyf = wf_font.table_data(Tag::new(b"glyf")).is_some();
+    let has_cff = wf_font.table_data(Tag::new(b"CFF ")).is_some()
+        || wf_font.table_data(Tag::new(b"CFF2")).is_some();
+    has_glyf && !has_cff
+}
+
+/// Build a format 3.0 post table, reusing the header metadata (italic angle,
+/// underline metrics, etc.) from the input font's post. Format 3 has no
+/// glyph-name index, so it stays consistent after the glyph count changes.
+fn build_post_v3(wf_font: &WfFontRef<'_>) -> Result<Post, String> {
+    let post_bytes = wf_font
+        .table_data(Tag::new(b"post"))
+        .ok_or_else(|| "Font is missing 'post' table".to_string())?;
+    let mut post = Post::read(post_bytes).map_err(|e| format!("Failed to own post: {e}"))?;
+    post.version = Version16Dot16::VERSION_3_0;
+    post.num_glyphs = None;
+    post.glyph_name_index = None;
+    post.string_data = None;
+    Ok(post)
 }
 
 /// Per-glyph extraction result.
 struct OriginalGlyph {
     commands: Vec<PathCommand>,
-    /// Advance width reported by skrifa; kept around for debugging and future
-    /// use, even if the builder reads hmtx directly for byte-exact output.
-    #[allow(dead_code)]
-    advance: f32,
-    /// `false` if the outline contains anything we can't serialise as a simple
-    /// glyph (e.g. composites — we'll just emit an empty glyph, no alternates).
+    /// Whether the glyph consists entirely of quadratic (TrueType) curves.
+    /// False if the outline pen emitted any cubic curves, in which case
+    /// we skip alternate generation for safety.
     is_simple: bool,
 }
 
@@ -454,9 +535,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_ttf_rejects_garbage() {
+    fn is_ttf_errors_on_garbage() {
         let data = b"not a font at all";
-        assert!(is_ttf(data).is_err());
+        assert!(WfFontRef::new(data.as_slice()).is_err());
     }
 
     #[test]
@@ -483,6 +564,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "requires macOS Arial.ttf; run with --ignored"]
     fn bake_arial_roundtrip() {
         let arial = std::path::Path::new("/System/Library/Fonts/Supplemental/Arial.ttf");
         if !arial.exists() {

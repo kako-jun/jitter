@@ -59,8 +59,21 @@ CLI (clap)
         ├── glyf/loca rebuild with write-fonts GlyfLocaBuilder
         ├── maxp / hhea / hmtx update (num_glyphs += alternates)
         ├── GSUB: rand feature + AlternateSubstFormat1
-        └── Pass-through copy of cmap, name, OS/2, post, head via FontBuilder
+        ├── post downgraded to format 3.0 (no glyph names, count-consistent)
+        └── Pass-through copy of cmap, name, OS/2, head via FontBuilder
 ```
+
+### bake mode phase A limitations
+
+- Input: TTF only (OTF/CFF blocked). CFF/CFF2 tables cause an explicit error.
+- `.notdef` (gid 0) is preserved unchanged and excluded from alternates.
+- Composite glyphs are consumed via skrifa's pen and re-emitted as flat simple
+  glyphs in the output (structure flattened, visual appearance preserved).
+- Cubic-bearing glyphs (non-TrueType outlines surfaced by skrifa) are passed
+  through without alternates; a warning is logged.
+- GSUB emits a single `rand` feature under script=DFLT, langsys=default.
+  Browser support for `rand` is limited; Phase B will add a `calt` cycling
+  fallback.
 
 ## Future integration
 

@@ -30,7 +30,7 @@ jitter bake my-font.ttf --output my-font-jittered.ttf
 
 **Current limitations** (phase A):
 - Input must be TTF. OTF/CFF fonts are not yet supported.
-- Uses the `rand` OpenType feature. Not all renderers (notably many browsers) honor it. A `calt`-based fallback is planned.
+- Uses the `rand` OpenType feature, which is not honored by most browser CSS rendering paths. A `calt`-based fallback is planned for phase B.
 
 ## Installation
 
