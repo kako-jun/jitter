@@ -21,12 +21,16 @@ jitter render "reproducible" --font my-font.ttf --seed 42
 
 ### bake
 
-Takes a font file and generates multiple variant glyphs per character, embedding them as OpenType `calt` (contextual alternates). The output font automatically cycles through variants, so text rendered with it looks naturally varied without any special tooling.
+Takes a TTF font and generates N variant glyphs per character, embedding them as an OpenType `rand` feature (alternate substitution). Text rendered with the output font in renderers that honor `rand` (HarfBuzz, CoreText, DirectWrite) will show naturally varied glyphs.
 
 ```
 jitter bake my-font.ttf --alternates 4 --intensity 0.6
 jitter bake my-font.ttf --output my-font-jittered.ttf
 ```
+
+**Current limitations** (phase A):
+- Input must be TTF. OTF/CFF fonts are not yet supported.
+- Uses the `rand` OpenType feature. Not all renderers (notably many browsers) honor it. A `calt`-based fallback is planned.
 
 ## Installation
 
@@ -58,8 +62,10 @@ jitter bake <INPUT> [--output <FILE>] [--alternates <N>] [--intensity <0.0-1.0>]
 ## Roadmap
 
 1. ~~render mode (text + font -> SVG with per-character variation)~~ ✓
-2. bake mode (font -> font with calt alternates)
-3. my-font-craft integration (use jitter as a post-processing step)
+2. ~~bake mode phase A (TTF + `rand` feature)~~ ✓
+3. bake mode phase B (calt-based fallback for wider renderer support)
+4. bake mode phase C (OTF/CFF support)
+5. my-font-craft integration (use jitter as a post-processing step)
 
 ## License
 
