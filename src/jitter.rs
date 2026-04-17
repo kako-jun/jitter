@@ -1,6 +1,6 @@
 use crate::font::PathCommand;
-use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 /// Per-glyph random transformation parameters.
 struct GlyphTransform {
@@ -24,7 +24,7 @@ struct GlyphTransform {
 /// The `intensity` parameter (0.0-1.0) controls the magnitude of the variation.
 /// `units_per_em` is used to scale the position offset relative to glyph size.
 /// When `seed` is `Some`, a deterministic RNG is used so that the same input
-/// produces identical output. When `None`, the thread-local RNG is used.
+/// produces identical output. When `None`, a non-deterministic RNG is used.
 pub fn apply_jitter(
     glyph_commands: &[Vec<PathCommand>],
     intensity: f64,
@@ -33,7 +33,7 @@ pub fn apply_jitter(
 ) -> Vec<Vec<PathCommand>> {
     match seed {
         Some(s) => {
-            let mut rng = StdRng::seed_from_u64(s);
+            let mut rng = ChaCha8Rng::seed_from_u64(s);
             run_with_rng(&mut rng, glyph_commands, intensity, units_per_em)
         }
         None => {
@@ -179,20 +179,12 @@ mod tests {
         ]
     }
 
-    fn debug_repr(v: &[Vec<PathCommand>]) -> String {
-        format!("{v:?}")
-    }
-
     #[test]
     fn same_seed_produces_identical_output() {
         let input = sample_input();
         let a = apply_jitter(&input, 0.7, 1000.0, Some(42));
         let b = apply_jitter(&input, 0.7, 1000.0, Some(42));
-        assert_eq!(
-            debug_repr(&a),
-            debug_repr(&b),
-            "same seed must produce identical output"
-        );
+        assert_eq!(a, b, "same seed must produce identical output");
     }
 
     #[test]
@@ -200,10 +192,23 @@ mod tests {
         let input = sample_input();
         let a = apply_jitter(&input, 0.7, 1000.0, Some(1));
         let b = apply_jitter(&input, 0.7, 1000.0, Some(2));
-        assert_ne!(
-            debug_repr(&a),
-            debug_repr(&b),
-            "different seeds must produce different output"
-        );
+        assert_ne!(a, b, "different seeds must produce different output");
+    }
+
+    #[test]
+    fn no_seed_uses_thread_rng_and_still_varies() {
+        let input = sample_input();
+        let out = apply_jitter(&input, 0.7, 1000.0, None);
+        assert_eq!(out.len(), input.len());
+        // intensity > 0 なので入力と異なるはず
+        assert_ne!(out, input);
+    }
+
+    #[test]
+    fn intensity_zero_is_identity_regardless_of_seed() {
+        let input = sample_input();
+        let a = apply_jitter(&input, 0.0, 1000.0, Some(1));
+        let b = apply_jitter(&input, 0.0, 1000.0, Some(9999));
+        assert_eq!(a, b);
     }
 }

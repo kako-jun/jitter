@@ -18,6 +18,7 @@ rust-version = "1.78.0"
 clap = { version = "4", features = ["derive"] }
 skrifa = "0.26"
 rand = "0.8"
+rand_chacha = "0.3"
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

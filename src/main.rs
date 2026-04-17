@@ -38,7 +38,7 @@ enum Commands {
         size: u32,
 
         /// Random seed for reproducible output (u64)
-        #[arg(long)]
+        #[arg(long, value_name = "N")]
         seed: Option<u64>,
     },
     /// Bake variation into a font file (generates calt alternates)
@@ -113,21 +113,17 @@ fn main() {
                 std::process::exit(1);
             }
 
-            match seed {
-                Some(s) => println!(
-                    "Rendered \"{}\" -> {} ({} bytes) (seed: {})",
-                    text,
-                    output.display(),
-                    svg_output.len(),
-                    s
-                ),
-                None => println!(
-                    "Rendered \"{}\" -> {} ({} bytes)",
-                    text,
-                    output.display(),
-                    svg_output.len()
-                ),
-            }
+            let seed_note = match seed {
+                Some(s) => format!(" (seed: {s})"),
+                None => String::new(),
+            };
+            println!(
+                "Rendered \"{}\" -> {} ({} bytes){}",
+                text,
+                output.display(),
+                svg_output.len(),
+                seed_note
+            );
         }
         Commands::Bake {
             input,
