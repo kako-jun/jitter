@@ -1,3 +1,4 @@
+mod bake;
 mod font;
 mod jitter;
 mod layout;
@@ -180,8 +181,11 @@ fn main() {
                 intensity,
                 output.display()
             );
-            eprintln!("bake mode is not yet implemented");
-            std::process::exit(1);
+            if let Err(e) = bake::bake_font(&input, &output, alternates, intensity) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            println!("Wrote {}", output.display());
         }
     }
 }

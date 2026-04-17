@@ -66,6 +66,29 @@ fn run_with_rng<R: Rng>(
         .collect()
 }
 
+/// Apply jitter to a single glyph's path commands.
+///
+/// Convenience wrapper for `apply_jitter` when you only have one glyph and
+/// want the transformed commands back directly instead of as a singleton
+/// vector.
+pub fn apply_jitter_one(
+    commands: &[PathCommand],
+    intensity: f64,
+    units_per_em: f64,
+) -> Vec<PathCommand> {
+    let mut rng = rand::thread_rng();
+    let (cx, cy) = compute_center(commands);
+    let transform = GlyphTransform {
+        angle: rng.gen_range(-5.0..5.0_f64).to_radians() * intensity,
+        dx: rng.gen_range(-1.0..1.0) * units_per_em * 0.03 * intensity,
+        dy: rng.gen_range(-1.0..1.0) * units_per_em * 0.03 * intensity,
+        scale: 1.0 + rng.gen_range(-0.05..0.05) * intensity,
+        cx,
+        cy,
+    };
+    apply_transform(commands, &transform)
+}
+
 /// Compute the bounding box center of a set of path commands.
 fn compute_center(commands: &[PathCommand]) -> (f64, f64) {
     let mut min_x = f64::MAX;
