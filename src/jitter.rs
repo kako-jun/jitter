@@ -1,5 +1,6 @@
 use crate::font::PathCommand;
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 /// Per-glyph random transformation parameters.
 struct GlyphTransform {
@@ -22,13 +23,32 @@ struct GlyphTransform {
 /// Each glyph gets a random rotation, position offset, and scale variation.
 /// The `intensity` parameter (0.0-1.0) controls the magnitude of the variation.
 /// `units_per_em` is used to scale the position offset relative to glyph size.
+/// When `seed` is `Some`, a deterministic RNG is used so that the same input
+/// produces identical output. When `None`, the thread-local RNG is used.
 pub fn apply_jitter(
     glyph_commands: &[Vec<PathCommand>],
     intensity: f64,
     units_per_em: f64,
+    seed: Option<u64>,
 ) -> Vec<Vec<PathCommand>> {
-    let mut rng = rand::thread_rng();
+    match seed {
+        Some(s) => {
+            let mut rng = StdRng::seed_from_u64(s);
+            run_with_rng(&mut rng, glyph_commands, intensity, units_per_em)
+        }
+        None => {
+            let mut rng = rand::thread_rng();
+            run_with_rng(&mut rng, glyph_commands, intensity, units_per_em)
+        }
+    }
+}
 
+fn run_with_rng<R: Rng>(
+    rng: &mut R,
+    glyph_commands: &[Vec<PathCommand>],
+    intensity: f64,
+    units_per_em: f64,
+) -> Vec<Vec<PathCommand>> {
     glyph_commands
         .iter()
         .map(|commands| {
@@ -136,4 +156,54 @@ fn transform_point(x: f64, y: f64, t: &GlyphTransform) -> (f64, f64) {
     let ry = dx * sin + dy * cos;
     // Translate back and apply position offset
     (rx + t.cx + t.dx, ry + t.cy + t.dy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_input() -> Vec<Vec<PathCommand>> {
+        vec![
+            vec![
+                PathCommand::MoveTo(0.0, 0.0),
+                PathCommand::LineTo(100.0, 100.0),
+                PathCommand::QuadTo(50.0, 150.0, 100.0, 200.0),
+                PathCommand::CurveTo(10.0, 20.0, 30.0, 40.0, 50.0, 60.0),
+                PathCommand::Close,
+            ],
+            vec![
+                PathCommand::MoveTo(200.0, 200.0),
+                PathCommand::LineTo(300.0, 250.0),
+                PathCommand::Close,
+            ],
+        ]
+    }
+
+    fn debug_repr(v: &[Vec<PathCommand>]) -> String {
+        format!("{v:?}")
+    }
+
+    #[test]
+    fn same_seed_produces_identical_output() {
+        let input = sample_input();
+        let a = apply_jitter(&input, 0.7, 1000.0, Some(42));
+        let b = apply_jitter(&input, 0.7, 1000.0, Some(42));
+        assert_eq!(
+            debug_repr(&a),
+            debug_repr(&b),
+            "same seed must produce identical output"
+        );
+    }
+
+    #[test]
+    fn different_seeds_produce_different_output() {
+        let input = sample_input();
+        let a = apply_jitter(&input, 0.7, 1000.0, Some(1));
+        let b = apply_jitter(&input, 0.7, 1000.0, Some(2));
+        assert_ne!(
+            debug_repr(&a),
+            debug_repr(&b),
+            "different seeds must produce different output"
+        );
+    }
 }
