@@ -44,7 +44,7 @@ jitter bake <INPUT> [--output <FILE>] [--alternates <N>] [--intensity <0.0-1.0>]
 ### Options
 
 - `--font`, `-f`: Path to a .ttf or .otf font file
-- `--output`, `-o`: Output file path (default: `output.svg` for render). For render mode, `.svg` or `.png` extensions are supported.
+- `--output`, `-o`: Output file path (default: `output.svg`). Format is auto-detected from the extension (`.svg` or `.png`, render mode only).
 - `--intensity`, `-i`: How much variation to apply, from 0.0 (none) to 1.0 (maximum)
 - `--size`, `-s`: Font size in pixels (render mode only, default: 48)
 - `--seed`: Random seed (u64) for reproducible output. When omitted, output is non-deterministic (render mode only)

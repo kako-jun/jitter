@@ -1,4 +1,5 @@
 use crate::font::{GlyphData, PathCommand};
+use crate::layout;
 use std::fmt::Write;
 
 /// Generate an SVG string from jittered glyph data.
@@ -10,20 +11,14 @@ pub fn render_svg(
     font_size: u32,
     units_per_em: u16,
 ) -> String {
-    let scale = font_size as f64 / units_per_em as f64;
-
-    // Calculate total width and height
-    let total_advance: f64 = glyphs.iter().map(|g| g.advance_width as f64).sum();
-    let svg_width = (total_advance * scale).ceil() as u32;
-    // Use 1.5x font size for height to accommodate ascenders/descenders
-    let svg_height = (font_size as f64 * 1.5).ceil() as u32;
-    // Baseline at ~75% of the height
-    let baseline_y = font_size as f64 * 1.1;
+    let m = layout::compute_metrics(glyphs, font_size, units_per_em);
 
     let mut svg = String::new();
     writeln!(
         &mut svg,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_width} {svg_height}" width="{svg_width}" height="{svg_height}">"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">"#,
+        w = m.width,
+        h = m.height,
     )
     .unwrap();
 
@@ -36,7 +31,7 @@ pub fn render_svg(
             continue;
         }
 
-        let path_d = commands_to_path_d(commands, scale, cursor_x * scale, baseline_y);
+        let path_d = commands_to_path_d(commands, m.scale, cursor_x * m.scale, m.baseline_y);
         if !path_d.is_empty() {
             writeln!(&mut svg, r#"  <path id="g{i}" d="{path_d}" fill="black"/>"#,).unwrap();
         }
@@ -60,31 +55,24 @@ fn commands_to_path_d(
     let mut d = String::new();
 
     for cmd in commands {
-        match cmd {
+        match *cmd {
             PathCommand::MoveTo(x, y) => {
-                let sx = *x as f64 * scale + offset_x;
-                let sy = -*y as f64 * scale + baseline_y;
+                let (sx, sy) = layout::transform_point(x, y, scale, offset_x, baseline_y);
                 write!(&mut d, "M{sx:.2} {sy:.2} ").unwrap();
             }
             PathCommand::LineTo(x, y) => {
-                let sx = *x as f64 * scale + offset_x;
-                let sy = -*y as f64 * scale + baseline_y;
+                let (sx, sy) = layout::transform_point(x, y, scale, offset_x, baseline_y);
                 write!(&mut d, "L{sx:.2} {sy:.2} ").unwrap();
             }
             PathCommand::QuadTo(cx, cy, x, y) => {
-                let scx = *cx as f64 * scale + offset_x;
-                let scy = -*cy as f64 * scale + baseline_y;
-                let sx = *x as f64 * scale + offset_x;
-                let sy = -*y as f64 * scale + baseline_y;
+                let (scx, scy) = layout::transform_point(cx, cy, scale, offset_x, baseline_y);
+                let (sx, sy) = layout::transform_point(x, y, scale, offset_x, baseline_y);
                 write!(&mut d, "Q{scx:.2} {scy:.2} {sx:.2} {sy:.2} ").unwrap();
             }
             PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => {
-                let scx0 = *cx0 as f64 * scale + offset_x;
-                let scy0 = -*cy0 as f64 * scale + baseline_y;
-                let scx1 = *cx1 as f64 * scale + offset_x;
-                let scy1 = -*cy1 as f64 * scale + baseline_y;
-                let sx = *x as f64 * scale + offset_x;
-                let sy = -*y as f64 * scale + baseline_y;
+                let (scx0, scy0) = layout::transform_point(cx0, cy0, scale, offset_x, baseline_y);
+                let (scx1, scy1) = layout::transform_point(cx1, cy1, scale, offset_x, baseline_y);
+                let (sx, sy) = layout::transform_point(x, y, scale, offset_x, baseline_y);
                 write!(
                     &mut d,
                     "C{scx0:.2} {scy0:.2} {scx1:.2} {scy1:.2} {sx:.2} {sy:.2} "

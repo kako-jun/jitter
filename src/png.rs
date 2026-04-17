@@ -1,4 +1,5 @@
 use crate::font::{GlyphData, PathCommand};
+use crate::layout;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 
 /// Render jittered glyph data to a transparent PNG byte buffer.
@@ -11,19 +12,27 @@ pub fn render_png(
     font_size: u32,
     units_per_em: u16,
 ) -> Result<Vec<u8>, String> {
-    let scale = font_size as f64 / units_per_em as f64;
+    let pixmap = build_pixmap(glyphs, jittered_commands, font_size, units_per_em)?;
+    pixmap.encode_png().map_err(|e| e.to_string())
+}
 
-    // Calculate total width and height (identical to svg::render_svg).
-    let total_advance: f64 = glyphs.iter().map(|g| g.advance_width as f64).sum();
-    let raw_width = (total_advance * scale).ceil() as u32;
-    let raw_height = (font_size as f64 * 1.5).ceil() as u32;
+/// Build a tiny-skia Pixmap by rasterizing the jittered glyph data.
+///
+/// Exposed at crate level so tests can inspect the raw pixel buffer.
+pub(crate) fn build_pixmap(
+    glyphs: &[GlyphData],
+    jittered_commands: &[Vec<PathCommand>],
+    font_size: u32,
+    units_per_em: u16,
+) -> Result<Pixmap, String> {
+    let m = layout::compute_metrics(glyphs, font_size, units_per_em);
+
     // Ensure Pixmap::new requirements (non-zero).
-    let width = raw_width.max(1);
-    let height = raw_height.max(1);
-    let baseline_y = font_size as f64 * 1.1;
+    let width = m.width.max(1);
+    let height = m.height.max(1);
 
-    let mut pixmap = Pixmap::new(width, height)
-        .ok_or_else(|| format!("Invalid pixmap size: {width}x{height}"))?;
+    let mut pixmap =
+        Pixmap::new(width, height).ok_or_else(|| format!("Pixmap too large: {width}x{height}"))?;
 
     let mut paint = Paint::default();
     paint.set_color(Color::BLACK);
@@ -38,38 +47,39 @@ pub fn render_png(
             continue;
         }
 
-        let offset_x = cursor_x * scale;
+        let offset_x = cursor_x * m.scale;
         let mut pb = PathBuilder::new();
-        let mut has_move = false;
 
         for cmd in commands {
             match *cmd {
                 PathCommand::MoveTo(x, y) => {
-                    let sx = (x as f64 * scale + offset_x) as f32;
-                    let sy = (-(y as f64) * scale + baseline_y) as f32;
-                    pb.move_to(sx, sy);
-                    has_move = true;
+                    let (sx, sy) = layout::transform_point(x, y, m.scale, offset_x, m.baseline_y);
+                    pb.move_to(sx as f32, sy as f32);
                 }
                 PathCommand::LineTo(x, y) => {
-                    let sx = (x as f64 * scale + offset_x) as f32;
-                    let sy = (-(y as f64) * scale + baseline_y) as f32;
-                    pb.line_to(sx, sy);
+                    let (sx, sy) = layout::transform_point(x, y, m.scale, offset_x, m.baseline_y);
+                    pb.line_to(sx as f32, sy as f32);
                 }
                 PathCommand::QuadTo(cx, cy, x, y) => {
-                    let scx = (cx as f64 * scale + offset_x) as f32;
-                    let scy = (-(cy as f64) * scale + baseline_y) as f32;
-                    let sx = (x as f64 * scale + offset_x) as f32;
-                    let sy = (-(y as f64) * scale + baseline_y) as f32;
-                    pb.quad_to(scx, scy, sx, sy);
+                    let (scx, scy) =
+                        layout::transform_point(cx, cy, m.scale, offset_x, m.baseline_y);
+                    let (sx, sy) = layout::transform_point(x, y, m.scale, offset_x, m.baseline_y);
+                    pb.quad_to(scx as f32, scy as f32, sx as f32, sy as f32);
                 }
                 PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => {
-                    let scx0 = (cx0 as f64 * scale + offset_x) as f32;
-                    let scy0 = (-(cy0 as f64) * scale + baseline_y) as f32;
-                    let scx1 = (cx1 as f64 * scale + offset_x) as f32;
-                    let scy1 = (-(cy1 as f64) * scale + baseline_y) as f32;
-                    let sx = (x as f64 * scale + offset_x) as f32;
-                    let sy = (-(y as f64) * scale + baseline_y) as f32;
-                    pb.cubic_to(scx0, scy0, scx1, scy1, sx, sy);
+                    let (scx0, scy0) =
+                        layout::transform_point(cx0, cy0, m.scale, offset_x, m.baseline_y);
+                    let (scx1, scy1) =
+                        layout::transform_point(cx1, cy1, m.scale, offset_x, m.baseline_y);
+                    let (sx, sy) = layout::transform_point(x, y, m.scale, offset_x, m.baseline_y);
+                    pb.cubic_to(
+                        scx0 as f32,
+                        scy0 as f32,
+                        scx1 as f32,
+                        scy1 as f32,
+                        sx as f32,
+                        sy as f32,
+                    );
                 }
                 PathCommand::Close => {
                     pb.close();
@@ -77,22 +87,20 @@ pub fn render_png(
             }
         }
 
-        if has_move {
-            if let Some(path) = pb.finish() {
-                pixmap.fill_path(
-                    &path,
-                    &paint,
-                    FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
-            }
+        if let Some(path) = pb.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
         }
 
         cursor_x += glyph.advance_width as f64;
     }
 
-    pixmap.encode_png().map_err(|e| e.to_string())
+    Ok(pixmap)
 }
 
 #[cfg(test)]
@@ -123,5 +131,24 @@ mod tests {
         ]];
         let bytes = render_png(&glyphs, &cmds, 48, 1000).expect("dummy input should render");
         assert_eq!(&bytes[0..8], &PNG_SIGNATURE);
+    }
+
+    #[test]
+    fn renders_opaque_pixels() {
+        let glyphs = vec![GlyphData {
+            advance_width: 500.0,
+            commands: vec![],
+        }];
+        let cmds = vec![vec![
+            PathCommand::MoveTo(0.0, 0.0),
+            PathCommand::LineTo(500.0, 0.0),
+            PathCommand::LineTo(500.0, 500.0),
+            PathCommand::LineTo(0.0, 500.0),
+            PathCommand::Close,
+        ]];
+        let pixmap = build_pixmap(&glyphs, &cmds, 48, 1000).expect("dummy input should render");
+        let data = pixmap.data();
+        let has_opaque = data.chunks(4).any(|px| px[3] != 0);
+        assert!(has_opaque, "expected at least one non-transparent pixel");
     }
 }
