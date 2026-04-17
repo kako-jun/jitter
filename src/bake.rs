@@ -9,7 +9,8 @@
 //! - Composite glyphs are consumed via skrifa's pen and re-emitted as flat
 //!   simple glyphs (structure flattened, visual appearance preserved).
 //! - Cubic-bearing glyphs (non-TrueType outlines surfaced by skrifa) are
-//!   passed through without alternates; a warning is printed.
+//!   emitted as empty placeholders without alternates; a summary warning is
+//!   printed once after the pass.
 //! - Most tables (name, OS/2, cmap, ...) are copied from the input font
 //!   verbatim. `post` is downgraded to format 3.0 because the glyph count
 //!   changed and the original format 2 glyph-name index would be stale.
@@ -99,6 +100,7 @@ pub fn bake_font(
     // Extract each original glyph's outline.
     // `originals[i]` is the source for gid=i.
     let mut originals: Vec<OriginalGlyph> = Vec::with_capacity(num_glyphs as usize);
+    let mut cubic_warning_gids: Vec<u32> = Vec::new();
     for gid_u16 in 0..num_glyphs {
         let gid = GlyphId::new(gid_u16 as u32);
 
@@ -114,15 +116,36 @@ pub fn bake_font(
         };
 
         if !is_simple {
-            eprintln!(
-                "jitter: glyph {gid_u16} contains cubic curves; keeping original and skipping alternates"
-            );
+            cubic_warning_gids.push(gid_u16 as u32);
         }
 
         originals.push(OriginalGlyph {
             commands,
             is_simple,
         });
+    }
+
+    // Emit a single summary warning for glyphs that contained cubic curves.
+    // Those glyphs are written out as `Glyph::Empty` placeholders (keeping
+    // their gid valid) and are not given any alternates.
+    if !cubic_warning_gids.is_empty() {
+        let first = cubic_warning_gids
+            .iter()
+            .take(5)
+            .map(|g| g.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if cubic_warning_gids.len() > 5 {
+            format!(" (and {} more)", cubic_warning_gids.len() - 5)
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "warning: {} glyph(s) contained cubic curves and were emitted as empty placeholders without alternates: gid [{}]{}",
+            cubic_warning_gids.len(),
+            first,
+            more
+        );
     }
 
     // Compose the glyph list: originals first, then append alternates.
@@ -367,8 +390,9 @@ fn build_post_v3(wf_font: &WfFontRef<'_>) -> Result<Post, String> {
 struct OriginalGlyph {
     commands: Vec<PathCommand>,
     /// Whether the glyph consists entirely of quadratic (TrueType) curves.
-    /// False if the outline pen emitted any cubic curves, in which case
-    /// we skip alternate generation for safety.
+    /// False if the outline pen emitted any cubic curves, in which case the
+    /// glyph is emitted as an empty placeholder and skipped for alternate
+    /// generation.
     is_simple: bool,
 }
 
