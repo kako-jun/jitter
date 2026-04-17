@@ -15,6 +15,7 @@ Takes text and a font file, applies per-character random transformations (rotati
 ```
 jitter render "Hello, world!" --font my-font.ttf --output hello.svg
 jitter render "手書き風" --font noto-sans-jp.otf --output tegaki.svg --intensity 0.8 --size 64
+jitter render "reproducible" --font my-font.ttf --seed 42
 ```
 
 ### bake
@@ -35,7 +36,7 @@ cargo install jitter
 ## Usage
 
 ```
-jitter render <TEXT> --font <FONT> [--output <FILE>] [--intensity <0.0-1.0>] [--size <PX>]
+jitter render <TEXT> --font <FONT> [--output <FILE>] [--intensity <0.0-1.0>] [--size <PX>] [--seed <N>]
 jitter bake <INPUT> [--output <FILE>] [--alternates <N>] [--intensity <0.0-1.0>]
 ```
 
@@ -45,6 +46,7 @@ jitter bake <INPUT> [--output <FILE>] [--alternates <N>] [--intensity <0.0-1.0>]
 - `--output`, `-o`: Output file path (default: `output.svg` for render)
 - `--intensity`, `-i`: How much variation to apply, from 0.0 (none) to 1.0 (maximum)
 - `--size`, `-s`: Font size in pixels (render mode only, default: 48)
+- `--seed`: Random seed (u64) for reproducible output. When omitted, output is non-deterministic (render mode only)
 - `--alternates`, `-a`: Number of variant glyphs per character (bake mode only, default: 3)
 
 ## Output formats

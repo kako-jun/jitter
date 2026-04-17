@@ -169,6 +169,7 @@ dependencies = [
  "cargo-husky",
  "clap",
  "rand",
+ "rand_chacha",
  "skrifa",
 ]
 

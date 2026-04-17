@@ -36,6 +36,10 @@ enum Commands {
         /// Font size in pixels
         #[arg(short, long, default_value = "48")]
         size: u32,
+
+        /// Random seed for reproducible output (u64)
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
     },
     /// Bake variation into a font file (generates calt alternates)
     Bake {
@@ -84,6 +88,7 @@ fn main() {
             output,
             intensity,
             size,
+            seed,
         } => {
             if text.is_empty() {
                 eprintln!("Error: text must not be empty");
@@ -100,7 +105,7 @@ fn main() {
 
             let commands: Vec<Vec<font::PathCommand>> =
                 glyphs.iter().map(|g| g.commands.clone()).collect();
-            let jittered = jitter::apply_jitter(&commands, intensity, units_per_em as f64);
+            let jittered = jitter::apply_jitter(&commands, intensity, units_per_em as f64, seed);
             let svg_output = svg::render_svg(&glyphs, &jittered, size, units_per_em);
 
             if let Err(e) = std::fs::write(&output, &svg_output) {
@@ -108,11 +113,16 @@ fn main() {
                 std::process::exit(1);
             }
 
+            let seed_note = match seed {
+                Some(s) => format!(" (seed: {s})"),
+                None => String::new(),
+            };
             println!(
-                "Rendered \"{}\" -> {} ({} bytes)",
+                "Rendered \"{}\" -> {} ({} bytes){}",
                 text,
                 output.display(),
-                svg_output.len()
+                svg_output.len(),
+                seed_note
             );
         }
         Commands::Bake {

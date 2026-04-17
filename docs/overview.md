@@ -23,6 +23,8 @@ Each character gets independent random variation in:
 
 The `intensity` parameter (0.0 to 1.0) controls how much variation is applied. At 0.0, output is identical to the original font. At 1.0, maximum variation is applied.
 
+An optional `--seed <u64>` parameter makes output reproducible: the same text, font, intensity, and seed always produce identical SVG. Omitting `--seed` uses a non-deterministic RNG (previous behavior).
+
 ### bake mode
 
 Input: font file (.ttf/.otf)

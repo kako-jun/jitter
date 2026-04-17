@@ -1,5 +1,6 @@
 use crate::font::PathCommand;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 /// Per-glyph random transformation parameters.
 struct GlyphTransform {
@@ -22,13 +23,32 @@ struct GlyphTransform {
 /// Each glyph gets a random rotation, position offset, and scale variation.
 /// The `intensity` parameter (0.0-1.0) controls the magnitude of the variation.
 /// `units_per_em` is used to scale the position offset relative to glyph size.
+/// When `seed` is `Some`, a deterministic RNG is used so that the same input
+/// produces identical output. When `None`, a non-deterministic RNG is used.
 pub fn apply_jitter(
     glyph_commands: &[Vec<PathCommand>],
     intensity: f64,
     units_per_em: f64,
+    seed: Option<u64>,
 ) -> Vec<Vec<PathCommand>> {
-    let mut rng = rand::thread_rng();
+    match seed {
+        Some(s) => {
+            let mut rng = ChaCha8Rng::seed_from_u64(s);
+            run_with_rng(&mut rng, glyph_commands, intensity, units_per_em)
+        }
+        None => {
+            let mut rng = rand::thread_rng();
+            run_with_rng(&mut rng, glyph_commands, intensity, units_per_em)
+        }
+    }
+}
 
+fn run_with_rng<R: Rng>(
+    rng: &mut R,
+    glyph_commands: &[Vec<PathCommand>],
+    intensity: f64,
+    units_per_em: f64,
+) -> Vec<Vec<PathCommand>> {
     glyph_commands
         .iter()
         .map(|commands| {
@@ -136,4 +156,59 @@ fn transform_point(x: f64, y: f64, t: &GlyphTransform) -> (f64, f64) {
     let ry = dx * sin + dy * cos;
     // Translate back and apply position offset
     (rx + t.cx + t.dx, ry + t.cy + t.dy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_input() -> Vec<Vec<PathCommand>> {
+        vec![
+            vec![
+                PathCommand::MoveTo(0.0, 0.0),
+                PathCommand::LineTo(100.0, 100.0),
+                PathCommand::QuadTo(50.0, 150.0, 100.0, 200.0),
+                PathCommand::CurveTo(10.0, 20.0, 30.0, 40.0, 50.0, 60.0),
+                PathCommand::Close,
+            ],
+            vec![
+                PathCommand::MoveTo(200.0, 200.0),
+                PathCommand::LineTo(300.0, 250.0),
+                PathCommand::Close,
+            ],
+        ]
+    }
+
+    #[test]
+    fn same_seed_produces_identical_output() {
+        let input = sample_input();
+        let a = apply_jitter(&input, 0.7, 1000.0, Some(42));
+        let b = apply_jitter(&input, 0.7, 1000.0, Some(42));
+        assert_eq!(a, b, "same seed must produce identical output");
+    }
+
+    #[test]
+    fn different_seeds_produce_different_output() {
+        let input = sample_input();
+        let a = apply_jitter(&input, 0.7, 1000.0, Some(1));
+        let b = apply_jitter(&input, 0.7, 1000.0, Some(2));
+        assert_ne!(a, b, "different seeds must produce different output");
+    }
+
+    #[test]
+    fn no_seed_uses_thread_rng_and_still_varies() {
+        let input = sample_input();
+        let out = apply_jitter(&input, 0.7, 1000.0, None);
+        assert_eq!(out.len(), input.len());
+        // intensity > 0 なので入力と異なるはず
+        assert_ne!(out, input);
+    }
+
+    #[test]
+    fn intensity_zero_is_identity_regardless_of_seed() {
+        let input = sample_input();
+        let a = apply_jitter(&input, 0.0, 1000.0, Some(1));
+        let b = apply_jitter(&input, 0.0, 1000.0, Some(9999));
+        assert_eq!(a, b);
+    }
 }

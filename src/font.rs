@@ -5,7 +5,7 @@ use skrifa::MetadataProvider;
 use std::path::Path;
 
 /// A single path command extracted from a glyph outline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PathCommand {
     MoveTo(f32, f32),
     LineTo(f32, f32),
