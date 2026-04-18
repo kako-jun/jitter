@@ -21,6 +21,8 @@ Each character gets independent random variation in:
 - **Position offset**: vertical and horizontal drift
 - **Stroke weight**: subtle thickness variation (future)
 
+On top of the per-glyph rigid transform, every bezier control point receives an independent small offset, producing subtle internal curve shake that makes the same character visibly different each time it appears.
+
 The `intensity` parameter (0.0 to 1.0) controls how much variation is applied. At 0.0, output is identical to the original font. At 1.0, maximum variation is applied.
 
 An optional `--seed <u64>` parameter makes output reproducible: the same text, font, intensity, and seed always produce identical SVG. Omitting `--seed` uses a non-deterministic RNG (previous behavior).
