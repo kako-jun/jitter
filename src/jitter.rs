@@ -82,18 +82,14 @@ pub fn apply_jitter_one(
     intensity: f64,
     units_per_em: f64,
 ) -> Vec<PathCommand> {
+    // Route the thread_rng path through the same per-glyph pipeline as
+    // `apply_jitter` to keep the two implementations in lockstep. The
+    // per-call vec allocation is fine — this is not a hot path.
     let mut rng = rand::thread_rng();
-    let (cx, cy) = compute_center(commands);
-    let transform = GlyphTransform {
-        angle: rng.gen_range(-5.0..5.0_f64).to_radians() * intensity,
-        dx: rng.gen_range(-1.0..1.0) * units_per_em * 0.03 * intensity,
-        dy: rng.gen_range(-1.0..1.0) * units_per_em * 0.03 * intensity,
-        scale: 1.0 + rng.gen_range(-0.05..0.05) * intensity,
-        cx,
-        cy,
-    };
-    let transformed = apply_transform(commands, &transform);
-    apply_point_jitter(&transformed, &mut rng, intensity, units_per_em)
+    run_with_rng(&mut rng, &[commands.to_vec()], intensity, units_per_em)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 /// Apply independent small offsets to every on-curve / off-curve control
@@ -101,8 +97,9 @@ pub fn apply_jitter_one(
 /// point shakes on top of the per-glyph rotation/scale/translation.
 ///
 /// `Close` commands are passed through unchanged. Offsets are uniform in
-/// `[-1, 1) * units_per_em * POINT_JITTER_SCALE * intensity` per axis and
-/// are drawn independently for each coordinate of each point.
+/// `±units_per_em * POINT_JITTER_SCALE * intensity` per axis (half-open:
+/// upper bound exclusive, matching `Rng::gen_range(-1.0..1.0)`) and are
+/// drawn independently for each coordinate of each point.
 fn apply_point_jitter<R: Rng>(
     commands: &[PathCommand],
     rng: &mut R,
@@ -110,50 +107,35 @@ fn apply_point_jitter<R: Rng>(
     units_per_em: f64,
 ) -> Vec<PathCommand> {
     let amp = units_per_em * POINT_JITTER_SCALE * intensity;
-    let jitter = |rng: &mut R| -> (f64, f64) {
+    // Draw a single-axis offset in font units. `amp` stays in f64 for the
+    // multiplication, then the final point coordinate is f32 so we cast
+    // once at the return site instead of at every call site.
+    let offset = |rng: &mut R| -> f32 {
         if amp == 0.0 {
-            (0.0, 0.0)
+            0.0
         } else {
-            (
-                rng.gen_range(-1.0..1.0) * amp,
-                rng.gen_range(-1.0..1.0) * amp,
-            )
+            (rng.gen_range(-1.0..1.0) * amp) as f32
         }
     };
     commands
         .iter()
         .map(|cmd| match cmd {
-            PathCommand::MoveTo(x, y) => {
-                let (ox, oy) = jitter(rng);
-                PathCommand::MoveTo(*x + ox as f32, *y + oy as f32)
-            }
-            PathCommand::LineTo(x, y) => {
-                let (ox, oy) = jitter(rng);
-                PathCommand::LineTo(*x + ox as f32, *y + oy as f32)
-            }
-            PathCommand::QuadTo(cx, cy, x, y) => {
-                let (ocx, ocy) = jitter(rng);
-                let (ox, oy) = jitter(rng);
-                PathCommand::QuadTo(
-                    *cx + ocx as f32,
-                    *cy + ocy as f32,
-                    *x + ox as f32,
-                    *y + oy as f32,
-                )
-            }
-            PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => {
-                let (ocx0, ocy0) = jitter(rng);
-                let (ocx1, ocy1) = jitter(rng);
-                let (ox, oy) = jitter(rng);
-                PathCommand::CurveTo(
-                    *cx0 + ocx0 as f32,
-                    *cy0 + ocy0 as f32,
-                    *cx1 + ocx1 as f32,
-                    *cy1 + ocy1 as f32,
-                    *x + ox as f32,
-                    *y + oy as f32,
-                )
-            }
+            PathCommand::MoveTo(x, y) => PathCommand::MoveTo(*x + offset(rng), *y + offset(rng)),
+            PathCommand::LineTo(x, y) => PathCommand::LineTo(*x + offset(rng), *y + offset(rng)),
+            PathCommand::QuadTo(cx, cy, x, y) => PathCommand::QuadTo(
+                *cx + offset(rng),
+                *cy + offset(rng),
+                *x + offset(rng),
+                *y + offset(rng),
+            ),
+            PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => PathCommand::CurveTo(
+                *cx0 + offset(rng),
+                *cy0 + offset(rng),
+                *cx1 + offset(rng),
+                *cy1 + offset(rng),
+                *x + offset(rng),
+                *y + offset(rng),
+            ),
             PathCommand::Close => PathCommand::Close,
         })
         .collect()
@@ -303,6 +285,9 @@ mod tests {
         let a = apply_jitter(&input, 0.0, 1000.0, Some(1));
         let b = apply_jitter(&input, 0.0, 1000.0, Some(9999));
         assert_eq!(a, b);
+        // Per-point jitter must also be a strict identity at intensity=0,
+        // otherwise float-noise offsets could silently leak into every point.
+        assert_eq!(a, input);
     }
 
     /// With intensity > 0, per-point jitter should break the rigid-body
