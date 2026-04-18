@@ -7,6 +7,11 @@ use rand_chacha::ChaCha8Rng;
 /// relative to the rigid glyph translation (which uses 0.03).
 const POINT_JITTER_SCALE: f64 = 0.01;
 
+/// Maximum shear magnitude at `intensity = 1.0`, expressed as the tangent of
+/// the slant angle. `tan(5°) ≈ 0.0874`, i.e. the glyph leans up to ~5° off
+/// vertical/horizontal along either axis.
+const SHEAR_MAX: f64 = 0.087;
+
 /// Per-glyph random transformation parameters.
 struct GlyphTransform {
     /// Rotation angle in radians
@@ -15,8 +20,14 @@ struct GlyphTransform {
     dx: f64,
     /// Y offset in font units
     dy: f64,
-    /// Scale factor
-    scale: f64,
+    /// Scale factor along X (independent of Y for anisotropic scaling)
+    scale_x: f64,
+    /// Scale factor along Y (independent of X for anisotropic scaling)
+    scale_y: f64,
+    /// Shear along X (tan of slant angle): `x' += shear_x * y`
+    shear_x: f64,
+    /// Shear along Y (tan of slant angle): `y' += shear_y * x`
+    shear_y: f64,
     /// Glyph center X (for rotation/scale pivot)
     cx: f64,
     /// Glyph center Y (for rotation/scale pivot)
@@ -62,7 +73,10 @@ fn run_with_rng<R: Rng>(
                 angle: rng.gen_range(-5.0..5.0_f64).to_radians() * intensity,
                 dx: rng.gen_range(-1.0..1.0) * units_per_em * 0.03 * intensity,
                 dy: rng.gen_range(-1.0..1.0) * units_per_em * 0.03 * intensity,
-                scale: 1.0 + rng.gen_range(-0.05..0.05) * intensity,
+                scale_x: 1.0 + rng.gen_range(-0.10..0.10) * intensity,
+                scale_y: 1.0 + rng.gen_range(-0.10..0.10) * intensity,
+                shear_x: rng.gen_range(-1.0..1.0) * SHEAR_MAX * intensity,
+                shear_y: rng.gen_range(-1.0..1.0) * SHEAR_MAX * intensity,
                 cx,
                 cy,
             };
@@ -216,19 +230,22 @@ fn apply_transform(commands: &[PathCommand], t: &GlyphTransform) -> Vec<PathComm
         .collect()
 }
 
-/// Apply scale, rotation (around glyph center), and translation to a point.
+/// Apply anisotropic scale + shear, rotation (around glyph center), and
+/// translation to a point.
 fn transform_point(x: f64, y: f64, t: &GlyphTransform) -> (f64, f64) {
     // Translate to glyph center
     let dx = x - t.cx;
     let dy = y - t.cy;
-    // Scale
-    let dx = dx * t.scale;
-    let dy = dy * t.scale;
+    // 2x2 linear transform: anisotropic scale on the diagonal, shear on the
+    // off-diagonal. Applied before rotation so rotation sees the stretched
+    // glyph (matches the "slightly tall, slightly slanted" intent).
+    let sx = t.scale_x * dx + t.shear_x * dy;
+    let sy = t.shear_y * dx + t.scale_y * dy;
     // Rotate
     let cos = t.angle.cos();
     let sin = t.angle.sin();
-    let rx = dx * cos - dy * sin;
-    let ry = dx * sin + dy * cos;
+    let rx = sx * cos - sy * sin;
+    let ry = sx * sin + sy * cos;
     // Translate back and apply position offset
     (rx + t.cx + t.dx, ry + t.cy + t.dy)
 }
@@ -346,5 +363,59 @@ mod tests {
             max_off_line > 0.5,
             "per-point jitter should break collinearity (off-line = {max_off_line})"
         );
+    }
+
+    /// Directly verify that `apply_transform` honors anisotropic scale: with
+    /// `scale_x = 2.0` and everything else identity, the point `(1, 1)` maps
+    /// to `(2, 1)`. This locks down the x/y-independent scaling semantics.
+    #[test]
+    fn apply_transform_applies_anisotropic_scale() {
+        let t = GlyphTransform {
+            angle: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            scale_x: 2.0,
+            scale_y: 1.0,
+            shear_x: 0.0,
+            shear_y: 0.0,
+            cx: 0.0,
+            cy: 0.0,
+        };
+        let input = vec![PathCommand::MoveTo(1.0, 1.0)];
+        let out = apply_transform(&input, &t);
+        match out[0] {
+            PathCommand::MoveTo(x, y) => {
+                assert!((x - 2.0).abs() < 1e-5, "x should be 2.0, got {x}");
+                assert!((y - 1.0).abs() < 1e-5, "y should be 1.0, got {y}");
+            }
+            _ => panic!("expected MoveTo"),
+        }
+    }
+
+    /// Directly verify that `apply_transform` honors shear: with `shear_x =
+    /// 0.5` and everything else identity, `(0, 1)` maps to `(0.5, 1)` because
+    /// `shear_x * y = 0.5` is added to the x coordinate.
+    #[test]
+    fn apply_transform_applies_shear() {
+        let t = GlyphTransform {
+            angle: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            shear_x: 0.5,
+            shear_y: 0.0,
+            cx: 0.0,
+            cy: 0.0,
+        };
+        let input = vec![PathCommand::MoveTo(0.0, 1.0)];
+        let out = apply_transform(&input, &t);
+        match out[0] {
+            PathCommand::MoveTo(x, y) => {
+                assert!((x - 0.5).abs() < 1e-5, "x should be 0.5, got {x}");
+                assert!((y - 1.0).abs() < 1e-5, "y should be 1.0, got {y}");
+            }
+            _ => panic!("expected MoveTo"),
+        }
     }
 }
