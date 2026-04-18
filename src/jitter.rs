@@ -8,9 +8,9 @@ use rand_chacha::ChaCha8Rng;
 const POINT_JITTER_SCALE: f64 = 0.01;
 
 /// Maximum shear magnitude at `intensity = 1.0`, expressed as the tangent of
-/// the slant angle. `tan(5°) ≈ 0.0874`, i.e. the glyph leans up to ~5° off
-/// vertical/horizontal along either axis.
-const SHEAR_MAX: f64 = 0.087;
+/// the slant angle. `SHEAR_MAX = tan(5°) ≈ 0.0875`, i.e. the glyph leans up to
+/// ~5° off vertical/horizontal along either axis.
+const SHEAR_MAX: f64 = 0.087_488_663_525_924_01; // tan(5°)
 
 /// Per-glyph random transformation parameters.
 struct GlyphTransform {
@@ -28,15 +28,17 @@ struct GlyphTransform {
     shear_x: f64,
     /// Shear along Y (tan of slant angle): `y' += shear_y * x`
     shear_y: f64,
-    /// Glyph center X (for rotation/scale pivot)
+    /// Glyph center X (for rotation/scale/shear pivot)
     cx: f64,
-    /// Glyph center Y (for rotation/scale pivot)
+    /// Glyph center Y (for rotation/scale/shear pivot)
     cy: f64,
 }
 
 /// Apply jitter transformations to a list of path command sets (one per glyph).
 ///
-/// Each glyph gets a random rotation, position offset, and scale variation.
+/// Each glyph gets a random rotation, anisotropic scale, shear, and position
+/// offset, followed by independent per-point noise on every bezier control
+/// point.
 /// The `intensity` parameter (0.0-1.0) controls the magnitude of the variation.
 /// `units_per_em` is used to scale the position offset relative to glyph size.
 /// When `seed` is `Some`, a deterministic RNG is used so that the same input
