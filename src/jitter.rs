@@ -2,6 +2,11 @@ use crate::font::PathCommand;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+/// Upper bound on per-control-point offset, expressed as a fraction of
+/// `units_per_em` (multiplied by `intensity`). Keeps internal shake subtle
+/// relative to the rigid glyph translation (which uses 0.03).
+const POINT_JITTER_SCALE: f64 = 0.01;
+
 /// Per-glyph random transformation parameters.
 struct GlyphTransform {
     /// Rotation angle in radians
@@ -61,7 +66,8 @@ fn run_with_rng<R: Rng>(
                 cx,
                 cy,
             };
-            apply_transform(commands, &transform)
+            let transformed = apply_transform(commands, &transform);
+            apply_point_jitter(&transformed, rng, intensity, units_per_em)
         })
         .collect()
 }
@@ -86,7 +92,71 @@ pub fn apply_jitter_one(
         cx,
         cy,
     };
-    apply_transform(commands, &transform)
+    let transformed = apply_transform(commands, &transform);
+    apply_point_jitter(&transformed, &mut rng, intensity, units_per_em)
+}
+
+/// Apply independent small offsets to every on-curve / off-curve control
+/// point in the path. This sits *after* the rigid glyph transform so each
+/// point shakes on top of the per-glyph rotation/scale/translation.
+///
+/// `Close` commands are passed through unchanged. Offsets are uniform in
+/// `[-1, 1) * units_per_em * POINT_JITTER_SCALE * intensity` per axis and
+/// are drawn independently for each coordinate of each point.
+fn apply_point_jitter<R: Rng>(
+    commands: &[PathCommand],
+    rng: &mut R,
+    intensity: f64,
+    units_per_em: f64,
+) -> Vec<PathCommand> {
+    let amp = units_per_em * POINT_JITTER_SCALE * intensity;
+    let jitter = |rng: &mut R| -> (f64, f64) {
+        if amp == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (
+                rng.gen_range(-1.0..1.0) * amp,
+                rng.gen_range(-1.0..1.0) * amp,
+            )
+        }
+    };
+    commands
+        .iter()
+        .map(|cmd| match cmd {
+            PathCommand::MoveTo(x, y) => {
+                let (ox, oy) = jitter(rng);
+                PathCommand::MoveTo(*x + ox as f32, *y + oy as f32)
+            }
+            PathCommand::LineTo(x, y) => {
+                let (ox, oy) = jitter(rng);
+                PathCommand::LineTo(*x + ox as f32, *y + oy as f32)
+            }
+            PathCommand::QuadTo(cx, cy, x, y) => {
+                let (ocx, ocy) = jitter(rng);
+                let (ox, oy) = jitter(rng);
+                PathCommand::QuadTo(
+                    *cx + ocx as f32,
+                    *cy + ocy as f32,
+                    *x + ox as f32,
+                    *y + oy as f32,
+                )
+            }
+            PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => {
+                let (ocx0, ocy0) = jitter(rng);
+                let (ocx1, ocy1) = jitter(rng);
+                let (ox, oy) = jitter(rng);
+                PathCommand::CurveTo(
+                    *cx0 + ocx0 as f32,
+                    *cy0 + ocy0 as f32,
+                    *cx1 + ocx1 as f32,
+                    *cy1 + ocy1 as f32,
+                    *x + ox as f32,
+                    *y + oy as f32,
+                )
+            }
+            PathCommand::Close => PathCommand::Close,
+        })
+        .collect()
 }
 
 /// Compute the bounding box center of a set of path commands.
@@ -233,5 +303,63 @@ mod tests {
         let a = apply_jitter(&input, 0.0, 1000.0, Some(1));
         let b = apply_jitter(&input, 0.0, 1000.0, Some(9999));
         assert_eq!(a, b);
+    }
+
+    /// With intensity > 0, per-point jitter should break the rigid-body
+    /// invariant: i.e. the transformed points cannot all be explained by a
+    /// single affine transform applied to the input.
+    ///
+    /// Strategy: use a single glyph with several collinear points on y=0.
+    /// A pure rigid transform (rotation + uniform scale + translation)
+    /// preserves collinearity. After per-point jitter, at least one point
+    /// should deviate from the line through the first two output points.
+    #[test]
+    fn per_point_jitter_varies_internal_shape() {
+        let input = vec![vec![
+            PathCommand::MoveTo(0.0, 0.0),
+            PathCommand::LineTo(100.0, 0.0),
+            PathCommand::LineTo(200.0, 0.0),
+            PathCommand::LineTo(300.0, 0.0),
+            PathCommand::LineTo(400.0, 0.0),
+            PathCommand::Close,
+        ]];
+
+        let out = apply_jitter(&input, 1.0, 1000.0, Some(42));
+        assert_eq!(out.len(), 1);
+        let glyph = &out[0];
+
+        // Collect endpoints of MoveTo/LineTo in order.
+        let points: Vec<(f64, f64)> = glyph
+            .iter()
+            .filter_map(|cmd| match cmd {
+                PathCommand::MoveTo(x, y) | PathCommand::LineTo(x, y) => {
+                    Some((*x as f64, *y as f64))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(points.len(), 5);
+
+        // Line through the first two output points.
+        let (x0, y0) = points[0];
+        let (x1, y1) = points[1];
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        assert!(len > 0.0, "first two points must not coincide");
+
+        // Signed perpendicular distance from the line for each remaining point.
+        // If this were a pure rigid transform of collinear input, all
+        // distances would be 0 (within float noise). Per-point jitter must
+        // push at least one point off the line by a meaningful amount.
+        let mut max_off_line: f64 = 0.0;
+        for &(x, y) in &points[2..] {
+            let off = ((x - x0) * dy - (y - y0) * dx).abs() / len;
+            max_off_line = max_off_line.max(off);
+        }
+        assert!(
+            max_off_line > 0.5,
+            "per-point jitter should break collinearity (off-line = {max_off_line})"
+        );
     }
 }
