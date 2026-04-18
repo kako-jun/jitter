@@ -19,6 +19,7 @@ Each character gets independent random variation in:
 - **Rotation**: slight tilt (e.g. -3 to +3 degrees)
 - **Scale**: minor size changes (e.g. 0.95x to 1.05x)
 - **Position offset**: vertical and horizontal drift
+- **Per-point jitter**: each bezier control point receives an independent small offset on top of the rigid transform, producing internal curve shake that makes repeated glyphs visibly differ
 - **Stroke weight**: subtle thickness variation (future)
 
 The `intensity` parameter (0.0 to 1.0) controls how much variation is applied. At 0.0, output is identical to the original font. At 1.0, maximum variation is applied.
