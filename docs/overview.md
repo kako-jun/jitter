@@ -17,7 +17,8 @@ Output: SVG or PNG image (auto-selected from the `--output` file extension; PNG 
 
 Each character gets independent random variation in:
 - **Rotation**: slight tilt (e.g. -3 to +3 degrees)
-- **Scale**: minor size changes (e.g. 0.95x to 1.05x)
+- **Scale**: independent x/y scaling (e.g. 0.90x to 1.10x per axis)
+- **Shear**: mild slant along x/y (up to ±5°)
 - **Position offset**: vertical and horizontal drift
 - **Stroke weight**: subtle thickness variation (future)
 
