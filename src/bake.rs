@@ -1,25 +1,26 @@
-//! Bake mode: generate a new TTF with alternate glyphs and a GSUB `calt` feature.
+//! Bake mode: generate a new TTF with alternate glyphs and a GSUB `rand` feature.
 //!
-//! Phase B scope:
-//! - Input is TTF only (OTF / CFF / CFF2 is rejected).
+//! Phase C scope:
+//! - Input is TTF or OTF (CFF / CFF2). Output is always TTF (glyf/loca).
+//! - Cubic Bézier outlines from CFF sources are approximated as quadratic
+//!   curves so they can be stored in the TrueType `glyf` table.
 //! - For each non-empty simple glyph (excluding `.notdef`), N alternates are
 //!   created by re-running jitter, then registered in a minimal GSUB table
-//!   using the `calt` feature (Contextual Alternates) with ChainContextSubst
-//!   (LookupType 6, Format 1) and SingleSubstFormat2 lookups.
+//!   using the `rand` feature (OpenType 1.8) with AlternateSubstFormat1.
 //! - `.notdef` (gid 0) is preserved unchanged and excluded from alternates.
 //! - Composite glyphs are consumed via skrifa's pen and re-emitted as flat
 //!   simple glyphs (structure flattened, visual appearance preserved).
-//! - Cubic-bearing glyphs (non-TrueType outlines surfaced by skrifa) are
-//!   emitted as empty placeholders without alternates; a summary warning is
-//!   printed once after the pass.
 //! - Most tables (name, OS/2, cmap, ...) are copied from the input font
 //!   verbatim. `post` is downgraded to format 3.0 because the glyph count
 //!   changed and the original format 2 glyph-name index would be stale.
 //!
-//! Shapers that honour the `calt` feature will cycle through alternates for
-//! consecutive identical glyphs, producing the handwriting-like variation
-//! baked into the font itself.
+//! Shapers that honour the `rand` feature will pick a random alternate each
+//! time the glyph is laid out, producing the handwriting-like variation baked
+//! into the font itself. calt / contextual alternates are out of scope here
+//! and tracked as a follow-up.
 //!
+//! Compatibility note: `skrifa 0.26` uses `read-fonts 0.25`, while
+//! `write-fonts 0.31` uses `read-fonts 0.24`. Both are in the dependency graph.
 //! We use skrifa to read the font for outline extraction, and parse the same
 //! bytes again through `write_fonts::read` to hand to `FontBuilder`.
 
@@ -31,17 +32,16 @@ use skrifa::outline::OutlinePen;
 use skrifa::raw::{FileRef, TableProvider as SkrifaTableProvider};
 use skrifa::{GlyphId, MetadataProvider};
 use std::path::Path;
-use write_fonts::read::types::{GlyphId16, Tag};
+use write_fonts::read::types::Tag;
 use write_fonts::read::{FontRead, FontRef as WfFontRef};
 use write_fonts::tables::glyf::{GlyfLocaBuilder, Glyph, SimpleGlyph};
-use write_fonts::tables::gsub::{Gsub, SingleSubst, SubstitutionLookup};
+use write_fonts::tables::gsub::{AlternateSet, AlternateSubstFormat1, Gsub, SubstitutionLookup};
 use write_fonts::tables::head::Head;
 use write_fonts::tables::hhea::Hhea;
 use write_fonts::tables::hmtx::{Hmtx, LongMetric};
 use write_fonts::tables::layout::{
-    ChainedSequenceContext, ChainedSequenceRule, ChainedSequenceRuleSet, CoverageFormat1,
-    CoverageTable, Feature, FeatureList, FeatureRecord, LangSys, Lookup, LookupFlag, LookupList,
-    Script, ScriptList, ScriptRecord, SequenceLookupRecord,
+    CoverageFormat1, CoverageTable, Feature, FeatureList, FeatureRecord, LangSys, Lookup,
+    LookupFlag, LookupList, Script, ScriptList, ScriptRecord,
 };
 use write_fonts::tables::maxp::Maxp;
 use write_fonts::tables::post::Post;
@@ -51,7 +51,7 @@ use write_fonts::FontBuilder;
 /// Bake jitter variation into a font file.
 ///
 /// Reads the TTF at `input_path`, generates `alternates` jittered variants per
-/// glyph, and writes a new TTF with the `calt` GSUB feature to `output_path`.
+/// glyph, and writes a new TTF with the `rand` GSUB feature to `output_path`.
 pub fn bake_font(
     input_path: &Path,
     output_path: &Path,
@@ -74,15 +74,11 @@ pub fn bake_font(
         Err(e) => return Err(format!("Failed to parse font: {e}")),
     };
 
-    // Parse the same bytes through write-fonts so we can use FontBuilder,
-    // which requires write_fonts::read::FontRef rather than skrifa's types.
+    // Parse the same bytes through write-fonts' read-fonts to satisfy the
+    // builder's type expectations (the two read-fonts versions are distinct
+    // types in the dependency graph even though the wire format is the same).
     let wf_font =
         WfFontRef::new(&font_data).map_err(|e| format!("Failed to re-parse font: {e}"))?;
-
-    // Reject OTF / CFF / CFF2. Phase A is TTF-only.
-    if !is_ttf(&wf_font) {
-        return Err("OTF/CFF fonts are not yet supported (TTF only)".to_string());
-    }
 
     let num_glyphs = skrifa_font
         .maxp()
@@ -98,56 +94,25 @@ pub fn bake_font(
     // Extract each original glyph's outline.
     // `originals[i]` is the source for gid=i.
     let mut originals: Vec<OriginalGlyph> = Vec::with_capacity(num_glyphs as usize);
-    let mut cubic_warning_gids: Vec<u32> = Vec::new();
     for gid_u16 in 0..num_glyphs {
         let gid = GlyphId::new(gid_u16 as u32);
 
         let outline = outlines.get(gid);
-        let (commands, is_simple) = if let Some(glyph) = outline {
+        let commands = if let Some(glyph) = outline {
             let mut pen = CollectPen::new();
             glyph
                 .draw(Size::unscaled(), &mut pen)
                 .map_err(|e| format!("Failed to draw glyph {gid_u16}: {e}"))?;
-            (pen.commands, !pen.saw_nonsimple)
+            pen.commands
         } else {
-            (Vec::new(), true)
+            Vec::new()
         };
 
-        if !is_simple {
-            cubic_warning_gids.push(gid_u16 as u32);
-        }
-
-        originals.push(OriginalGlyph {
-            commands,
-            is_simple,
-        });
-    }
-
-    // Emit a single summary warning for glyphs that contained cubic curves.
-    // Those glyphs are written out as `Glyph::Empty` placeholders (keeping
-    // their gid valid) and are not given any alternates.
-    if !cubic_warning_gids.is_empty() {
-        let first = cubic_warning_gids
-            .iter()
-            .take(5)
-            .map(|g| g.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let more = if cubic_warning_gids.len() > 5 {
-            format!(" (and {} more)", cubic_warning_gids.len() - 5)
-        } else {
-            String::new()
-        };
-        eprintln!(
-            "warning: {} glyph(s) contained cubic curves and were emitted as empty placeholders without alternates: gid [{}]{}",
-            cubic_warning_gids.len(),
-            first,
-            more
-        );
+        originals.push(OriginalGlyph { commands });
     }
 
     // Compose the glyph list: originals first, then append alternates.
-    // Track alternate gids per origin so we can build the GSUB calt
+    // Track alternate gids per origin so we can build the GSUB Alternate
     // substitution afterwards.
     let mut alt_map: Vec<Vec<u16>> = vec![Vec::new(); num_glyphs as usize];
     let mut new_glyphs: Vec<Glyph> = Vec::with_capacity(num_glyphs as usize);
@@ -164,22 +129,22 @@ pub fn bake_font(
     let hmtx_bytes_ro = wf_font
         .table_data(Tag::new(b"hmtx"))
         .ok_or_else(|| "Font is missing 'hmtx' table".to_string())?;
-    let original_hmtx =
-        write_fonts::read::tables::hmtx::Hmtx::read(hmtx_bytes_ro, num_long_metrics as u16)
-            .map_err(|e| format!("Failed to read hmtx: {e}"))?;
+    let original_hmtx = write_fonts::read::tables::hmtx::Hmtx::read(
+        hmtx_bytes_ro,
+        num_long_metrics as u16,
+    )
+    .map_err(|e| format!("Failed to read hmtx: {e}"))?;
 
     // Originals pass: build Glyph + LongMetric for each gid.
-    // For cubic-bearing (is_simple=false) glyphs we still emit a placeholder
-    // (Glyph::Empty) so the gid stays valid; the warning above surfaces this.
     for (gid, orig) in originals.iter().enumerate() {
-        let glyph = build_simple_glyph(&orig.commands, orig.is_simple)?;
+        let glyph = build_simple_glyph(&orig.commands, gid as u16)?;
         new_glyphs.push(glyph);
 
         let (advance, lsb) = resolve_original_hmtx(&original_hmtx, gid, num_long_metrics);
         new_metrics.push(LongMetric::new(advance, lsb));
     }
 
-    // Alternates pass: only for non-empty simple glyphs, and never for .notdef (gid 0).
+    // Alternates pass: only for non-empty glyphs, and never for .notdef (gid 0).
     let mut next_gid: u32 = num_glyphs as u32;
     for gid in 0..num_glyphs as usize {
         if gid == 0 {
@@ -187,7 +152,7 @@ pub fn bake_font(
             continue;
         }
         let orig = &originals[gid];
-        if !orig.is_simple || orig.commands.is_empty() {
+        if orig.commands.is_empty() {
             continue;
         }
         for _ in 0..alternates {
@@ -203,7 +168,7 @@ pub fn bake_font(
             // Run jitter once per alternate to get a fresh variation.
             let jittered = jitter::apply_jitter_one(&orig.commands, intensity, units_per_em);
 
-            let glyph = build_simple_glyph(&jittered, true)?;
+            let glyph = build_simple_glyph(&jittered, next_gid as u16)?;
             new_glyphs.push(glyph);
             // Alternate inherits the advance width of its origin.
             let advance = new_metrics[gid].advance;
@@ -267,9 +232,8 @@ pub fn bake_font(
     // 3.0 stores no glyph names, so it is always consistent.
     let post = build_post_v3(&wf_font)?;
 
-    // Build a minimal GSUB: script DFLT / langsys dflt / feature calt /
-    // ChainContextSubst + SingleSubst lookups.
-    let gsub = build_gsub_calt(&alt_map)?;
+    // Build a minimal GSUB: script DFLT / langsys dflt / feature rand / AlternateSubst lookup.
+    let gsub = build_gsub(&alt_map)?;
 
     // Assemble the FontBuilder. We add the rebuilt tables first, then call
     // `copy_missing_tables` — which only inserts tables we haven't added — so
@@ -339,10 +303,10 @@ fn verify_baked_font(data: &[u8], expected_num_glyphs: u16) -> Result<(), String
     let hhea = font
         .hhea()
         .map_err(|e| format!("bake produced font whose hhea is unreadable: {e}"))?;
-    let num_h_metrics = hhea.number_of_h_metrics();
-    if num_h_metrics != expected_num_glyphs {
+    let num_long_metrics = hhea.number_of_h_metrics();
+    if num_long_metrics != expected_num_glyphs {
         return Err(format!(
-            "bake produced inconsistent font: hhea.number_of_h_metrics={num_h_metrics}, expected {expected_num_glyphs}"
+            "bake produced inconsistent font: hhea.number_of_long_metrics={num_long_metrics}, expected {expected_num_glyphs}"
         ));
     }
 
@@ -357,14 +321,6 @@ fn verify_baked_font(data: &[u8], expected_num_glyphs: u16) -> Result<(), String
     }
 
     Ok(())
-}
-
-/// Detect whether a font is a TTF (has `glyf`, no `CFF ` / `CFF2`).
-fn is_ttf(wf_font: &WfFontRef<'_>) -> bool {
-    let has_glyf = wf_font.table_data(Tag::new(b"glyf")).is_some();
-    let has_cff = wf_font.table_data(Tag::new(b"CFF ")).is_some()
-        || wf_font.table_data(Tag::new(b"CFF2")).is_some();
-    has_glyf && !has_cff
 }
 
 /// Build a format 3.0 post table, reusing the header metadata (italic angle,
@@ -385,27 +341,20 @@ fn build_post_v3(wf_font: &WfFontRef<'_>) -> Result<Post, String> {
 /// Per-glyph extraction result.
 struct OriginalGlyph {
     commands: Vec<PathCommand>,
-    /// Whether the glyph consists entirely of quadratic (TrueType) curves.
-    /// False if the outline pen emitted any cubic curves, in which case the
-    /// glyph is emitted as an empty placeholder and skipped for alternate
-    /// generation.
-    is_simple: bool,
 }
 
-/// OutlinePen that collects commands + notices constructs we can't re-emit as
-/// a simple TTF glyph. Composite glyphs come through as drawn outlines via
-/// skrifa, so we don't see a composite marker directly — we only flag cubic
-/// segments, which are legal in CFF but not in the TTF glyf table.
+/// OutlinePen that collects path commands from skrifa's outline API.
+/// Composite glyphs come through as drawn outlines via skrifa, so we don't
+/// see a composite marker directly. Cubic curves (legal in CFF) are collected
+/// as-is and converted to quadratic approximations later in `build_simple_glyph`.
 struct CollectPen {
     commands: Vec<PathCommand>,
-    saw_nonsimple: bool,
 }
 
 impl CollectPen {
     fn new() -> Self {
         Self {
             commands: Vec::new(),
-            saw_nonsimple: false,
         }
     }
 }
@@ -421,10 +370,6 @@ impl OutlinePen for CollectPen {
         self.commands.push(PathCommand::QuadTo(cx0, cy0, x, y));
     }
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
-        // Cubic in a TTF input would mean the outline came from somewhere
-        // exotic. We refuse to pretend, and skip alternate generation for
-        // this glyph.
-        self.saw_nonsimple = true;
         self.commands
             .push(PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y));
     }
@@ -435,12 +380,15 @@ impl OutlinePen for CollectPen {
 
 /// Convert a jitter path command list into a `write-fonts` SimpleGlyph via
 /// kurbo. Empty commands -> empty glyph (glyf allows zero-length entries).
-fn build_simple_glyph(commands: &[PathCommand], is_simple: bool) -> Result<Glyph, String> {
-    if !is_simple || commands.is_empty() {
+/// Cubic Bézier segments are approximated as quadratic curves so the result
+/// is always valid for the TrueType `glyf` table.
+fn build_simple_glyph(commands: &[PathCommand], gid: u16) -> Result<Glyph, String> {
+    if commands.is_empty() {
         return Ok(Glyph::Empty);
     }
 
     let mut path = BezPath::new();
+    let mut has_cubic = false;
     for cmd in commands {
         match *cmd {
             PathCommand::MoveTo(x, y) => path.move_to((x as f64, y as f64)),
@@ -448,19 +396,72 @@ fn build_simple_glyph(commands: &[PathCommand], is_simple: bool) -> Result<Glyph
             PathCommand::QuadTo(cx, cy, x, y) => {
                 path.quad_to((cx as f64, cy as f64), (x as f64, y as f64))
             }
-            PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => path.curve_to(
-                (cx0 as f64, cy0 as f64),
-                (cx1 as f64, cy1 as f64),
-                (x as f64, y as f64),
-            ),
+            PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => {
+                has_cubic = true;
+                path.curve_to(
+                    (cx0 as f64, cy0 as f64),
+                    (cx1 as f64, cy1 as f64),
+                    (x as f64, y as f64),
+                );
+            }
             PathCommand::Close => path.close_path(),
         }
     }
 
-    match SimpleGlyph::from_bezpath(&path) {
+    let final_path = if has_cubic {
+        cubic_to_quadratic(&path, 0.5)
+    } else {
+        path
+    };
+
+    match SimpleGlyph::from_bezpath(&final_path) {
         Ok(g) => Ok(Glyph::Simple(g)),
-        Err(_) => Ok(Glyph::Empty),
+        Err(_) => {
+            eprintln!("warning: glyph {gid} produced an invalid outline and was emitted as empty");
+            Ok(Glyph::Empty)
+        }
     }
+}
+
+/// Approximate all cubic Bézier segments in a `BezPath` as quadratic curves.
+///
+/// Uses `kurbo::CubicBez::to_quads` with the given accuracy (in font units).
+/// The output contains only `MoveTo`, `LineTo`, `QuadTo`, and `ClosePath`
+/// elements, making it suitable for `SimpleGlyph::from_bezpath`.
+fn cubic_to_quadratic(path: &BezPath, accuracy: f64) -> BezPath {
+    let mut quad = BezPath::new();
+    let mut current = kurbo::Point::ORIGIN;
+    let mut start = kurbo::Point::ORIGIN;
+
+    for el in path.elements() {
+        match *el {
+            kurbo::PathEl::MoveTo(p) => {
+                quad.move_to(p);
+                current = p;
+                start = p;
+            }
+            kurbo::PathEl::LineTo(p) => {
+                quad.line_to(p);
+                current = p;
+            }
+            kurbo::PathEl::QuadTo(p1, p2) => {
+                quad.quad_to(p1, p2);
+                current = p2;
+            }
+            kurbo::PathEl::CurveTo(p1, p2, p3) => {
+                let c = kurbo::CubicBez::new(current, p1, p2, p3);
+                for (_, _, q) in c.to_quads(accuracy) {
+                    quad.quad_to(q.p1, q.p2);
+                }
+                current = p3;
+            }
+            kurbo::PathEl::ClosePath => {
+                quad.close_path();
+                current = start;
+            }
+        }
+    }
+    quad
 }
 
 /// Look up `(advance, lsb)` for an original glyph from the input hmtx.
@@ -488,24 +489,11 @@ fn resolve_original_hmtx(
     }
 }
 
-/// Build a minimal GSUB table exposing `calt` feature backed by
-/// ChainContextSubst lookups that cycle through alternates for consecutive
-/// identical glyphs.
-///
-/// For each origin with N alternates, we create:
-/// - N SingleSubst lookups: origin → alt_k (k = 0..N-1)
-/// - 1 ChainContextSubst lookup: Coverage=[origin], with N+1 rules that
-///   check the backtrack glyph and apply the appropriate SingleSubst.
-///
-/// Chain rules:
-///   backtrack=[origin] → SingleSubst_0 (origin→alt_0)
-///   backtrack=[alt_0]  → SingleSubst_1 (origin→alt_1)
-///   ...
-///   backtrack=[alt_{N-2}] → SingleSubst_{N-1} (origin→alt_{N-1})
-///   backtrack=[alt_{N-1}] → SingleSubst_0 (origin→alt_0)  (cycle)
-fn build_gsub_calt(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
-    // Collect (origin_gid, alternates) pairs, sorted by gid so lookups
-    // are built in a stable, deterministic order.
+/// Build a minimal GSUB table exposing `rand` feature backed by one
+/// AlternateSubst lookup that covers every glyph with generated alternates.
+fn build_gsub(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
+    // Collect (origin_gid, alternates) pairs, sorted by gid so the coverage
+    // array is in numerical order as required by CoverageFormat1.
     let mut pairs: Vec<(u16, &Vec<u16>)> = alt_map
         .iter()
         .enumerate()
@@ -530,76 +518,35 @@ fn build_gsub_calt(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
         return Ok(Gsub::new(script_list, feature_list, lookup_list));
     }
 
-    let mut lookups: Vec<SubstitutionLookup> = Vec::new();
-    let mut feature_lookup_indices: Vec<u16> = Vec::new();
+    let coverage_glyphs: Vec<write_fonts::read::types::GlyphId16> = pairs
+        .iter()
+        .map(|(gid, _)| write_fonts::read::types::GlyphId16::new(*gid))
+        .collect();
+    let coverage = CoverageTable::Format1(CoverageFormat1::new(coverage_glyphs));
 
-    for (origin_gid, alts) in &pairs {
-        let num_alts = alts.len();
-        if num_alts == 0 {
-            continue;
-        }
+    let alt_sets: Vec<AlternateSet> = pairs
+        .iter()
+        .map(|(_, alts)| {
+            AlternateSet::new(
+                alts.iter()
+                    .map(|gid| write_fonts::read::types::GlyphId16::new(*gid))
+                    .collect(),
+            )
+        })
+        .collect();
 
-        // Base index in the global LookupList for this origin's SingleSubst lookups.
-        let base_lookup_idx = lookups.len() as u16;
+    let alt_subst = AlternateSubstFormat1::new(coverage, alt_sets);
+    let lookup = Lookup::new(LookupFlag::empty(), vec![alt_subst]);
+    let subst_lookup = SubstitutionLookup::Alternate(lookup);
+    let lookup_list: LookupList<SubstitutionLookup> = LookupList::new(vec![subst_lookup]);
 
-        // Create N SingleSubst lookups: origin → alt_k
-        for alt_gid in alts.iter() {
-            let coverage =
-                CoverageTable::Format1(CoverageFormat1::new(vec![GlyphId16::new(*origin_gid)]));
-            let subst = SingleSubst::format_2(coverage, vec![GlyphId16::new(*alt_gid)]);
-            let lookup = Lookup::new(LookupFlag::empty(), vec![subst]);
-            lookups.push(SubstitutionLookup::Single(lookup));
-        }
-
-        // Create 1 ChainContextSubst lookup for this origin.
-        let coverage =
-            CoverageTable::Format1(CoverageFormat1::new(vec![GlyphId16::new(*origin_gid)]));
-
-        let mut rules: Vec<ChainedSequenceRule> = Vec::with_capacity(num_alts + 1);
-
-        // Rule 0: previous glyph is origin → apply SingleSubst_0 (origin→alt_0)
-        rules.push(ChainedSequenceRule::new(
-            vec![GlyphId16::new(*origin_gid)],
-            vec![],
-            vec![],
-            vec![SequenceLookupRecord::new(0, base_lookup_idx)],
-        ));
-
-        // Rules 1..N-1: previous glyph is alt_{k-1} → apply SingleSubst_k
-        for k in 1..num_alts {
-            rules.push(ChainedSequenceRule::new(
-                vec![GlyphId16::new(alts[k - 1])],
-                vec![],
-                vec![],
-                vec![SequenceLookupRecord::new(0, base_lookup_idx + k as u16)],
-            ));
-        }
-
-        // Rule N: previous glyph is alt_{N-1} → apply SingleSubst_0 (cycle back)
-        rules.push(ChainedSequenceRule::new(
-            vec![GlyphId16::new(alts[num_alts - 1])],
-            vec![],
-            vec![],
-            vec![SequenceLookupRecord::new(0, base_lookup_idx)],
-        ));
-
-        let rule_set = ChainedSequenceRuleSet::new(rules);
-        let chain_context = ChainedSequenceContext::format_1(coverage, vec![Some(rule_set)]);
-        let chain_lookup = Lookup::new(LookupFlag::empty(), vec![chain_context.into()]);
-        let chain_lookup_idx = lookups.len() as u16;
-        lookups.push(SubstitutionLookup::ChainContextual(chain_lookup));
-        feature_lookup_indices.push(chain_lookup_idx);
-    }
-
-    let feature = Feature::new(None, feature_lookup_indices);
-    let feature_record = FeatureRecord::new(Tag::new(b"calt"), feature);
+    let feature = Feature::new(None, vec![0]);
+    let feature_record = FeatureRecord::new(Tag::new(b"rand"), feature);
     let feature_list = FeatureList::new(vec![feature_record]);
 
     let lang_sys = LangSys::new(vec![0]);
     let script = Script::new(Some(lang_sys), vec![]);
     let script_list = ScriptList::new(vec![ScriptRecord::new(Tag::new(b"DFLT"), script)]);
-
-    let lookup_list = LookupList::new(lookups);
 
     Ok(Gsub::new(script_list, feature_list, lookup_list))
 }
@@ -609,14 +556,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_ttf_errors_on_garbage() {
-        let data = b"not a font at all";
-        assert!(WfFontRef::new(data.as_slice()).is_err());
-    }
-
-    #[test]
-    fn build_gsub_calt_handles_empty() {
-        let g = build_gsub_calt(&[vec![], vec![]]).unwrap();
+    fn build_gsub_handles_empty() {
+        let g = build_gsub(&[vec![], vec![]]).unwrap();
         // Script DFLT present, feature list empty, lookup list empty.
         assert_eq!(g.script_list.script_records.len(), 1);
         assert_eq!(g.feature_list.feature_records.len(), 0);
@@ -624,30 +565,16 @@ mod tests {
     }
 
     #[test]
-    fn build_gsub_calt_with_one_alt_roundtrips() {
-        // gid 1 has alternates 3 and 4 (N = 2).
-        // Expect 2 SingleSubst + 1 ChainContextSubst = 3 lookups.
+    fn build_gsub_with_one_alt_roundtrips() {
+        // gid 1 has alternates 3 and 4.
         let mut map = vec![Vec::new(); 5];
         map[1] = vec![3, 4];
-        let g = build_gsub_calt(&map).unwrap();
+        let g = build_gsub(&map).unwrap();
         assert_eq!(
             g.feature_list.feature_records[0].feature_tag,
-            Tag::new(b"calt")
+            Tag::new(b"rand")
         );
-        assert_eq!(g.lookup_list.lookups.len(), 3);
-    }
-
-    #[test]
-    fn build_gsub_calt_with_single_alt() {
-        // N = 1: 1 SingleSubst + 1 ChainContextSubst (2 rules: origin→alt, alt→alt cycle).
-        let mut map = vec![Vec::new(); 5];
-        map[1] = vec![3];
-        let g = build_gsub_calt(&map).unwrap();
-        assert_eq!(
-            g.feature_list.feature_records[0].feature_tag,
-            Tag::new(b"calt")
-        );
-        assert_eq!(g.lookup_list.lookups.len(), 2);
+        assert_eq!(g.lookup_list.lookups.len(), 1);
     }
 
     #[cfg(target_os = "macos")]
@@ -670,5 +597,47 @@ mod tests {
         };
         let maxp = font.maxp().expect("maxp");
         assert!(maxp.num_glyphs() > 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires macOS STIXGeneral.otf; run with --ignored"]
+    fn bake_stix_otf_roundtrip() {
+        let otf = std::path::Path::new("/System/Library/Fonts/Supplemental/STIXGeneral.otf");
+        if !otf.exists() {
+            eprintln!("Skipping: STIXGeneral.otf not found");
+            return;
+        }
+        let tmp = std::env::temp_dir().join("jitter-bake-otf-roundtrip.ttf");
+        bake_font(otf, &tmp, 2, 0.3).expect("bake should succeed for OTF input");
+        let data = std::fs::read(&tmp).expect("read baked font");
+        let file = skrifa::raw::FileRef::new(&data).expect("skrifa re-parse");
+        let font = match file {
+            skrifa::raw::FileRef::Font(f) => f,
+            _ => panic!("expected single font"),
+        };
+        let maxp = font.maxp().expect("maxp");
+        assert!(maxp.num_glyphs() > 0);
+    }
+
+    #[test]
+    fn build_simple_glyph_with_cubic_produces_simple() {
+        // A minimal cubic Bézier path that should convert to quadratic and produce a SimpleGlyph.
+        let commands = vec![
+            PathCommand::MoveTo(0.0, 0.0),
+            PathCommand::CurveTo(10.0, 0.0, 20.0, 10.0, 30.0, 10.0),
+            PathCommand::Close,
+        ];
+        let result = build_simple_glyph(&commands, 1).unwrap();
+        assert!(
+            matches!(result, Glyph::Simple(_)),
+            "cubic commands should be approximated to quadratic and produce SimpleGlyph"
+        );
+    }
+
+    #[test]
+    fn build_simple_glyph_empty_returns_empty() {
+        let result = build_simple_glyph(&[], 0).unwrap();
+        assert!(matches!(result, Glyph::Empty));
     }
 }
