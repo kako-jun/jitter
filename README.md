@@ -28,8 +28,10 @@ jitter bake my-font.ttf --alternates 4 --intensity 0.6
 jitter bake my-font.ttf --output my-font-jittered.ttf
 ```
 
-**Current limitations**:
-- Output is always TTF (glyf). OTF/CFF inputs are converted to quadratic outlines.
+**Bake mode details**:
+- Input: TTF or OTF/CFF
+- Output: Always TTF (glyf format)
+- OTF/CFF inputs are converted to quadratic outlines to fit the TTF glyf table
 
 ## Installation
 
