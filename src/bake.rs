@@ -74,9 +74,8 @@ pub fn bake_font(
         Err(e) => return Err(format!("Failed to parse font: {e}")),
     };
 
-    // Parse the same bytes through write-fonts' read-fonts to satisfy the
-    // builder's type expectations (the two read-fonts versions are distinct
-    // types in the dependency graph even though the wire format is the same).
+    // Parse the same bytes through write-fonts so we can use FontBuilder,
+    // which requires write_fonts::read::FontRef rather than skrifa's types.
     let wf_font =
         WfFontRef::new(&font_data).map_err(|e| format!("Failed to re-parse font: {e}"))?;
 

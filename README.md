@@ -38,6 +38,8 @@ jitter bake my-font.ttf --output my-font-jittered.ttf
 cargo install jitter
 ```
 
+Requires Rust 1.85.0 or later.
+
 ## Usage
 
 ```
