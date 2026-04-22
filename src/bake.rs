@@ -129,11 +129,9 @@ pub fn bake_font(
     let hmtx_bytes_ro = wf_font
         .table_data(Tag::new(b"hmtx"))
         .ok_or_else(|| "Font is missing 'hmtx' table".to_string())?;
-    let original_hmtx = write_fonts::read::tables::hmtx::Hmtx::read(
-        hmtx_bytes_ro,
-        num_long_metrics as u16,
-    )
-    .map_err(|e| format!("Failed to read hmtx: {e}"))?;
+    let original_hmtx =
+        write_fonts::read::tables::hmtx::Hmtx::read(hmtx_bytes_ro, num_long_metrics as u16)
+            .map_err(|e| format!("Failed to read hmtx: {e}"))?;
 
     // Originals pass: build Glyph + LongMetric for each gid.
     for (gid, orig) in originals.iter().enumerate() {
