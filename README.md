@@ -28,9 +28,8 @@ jitter bake my-font.ttf --alternates 4 --intensity 0.6
 jitter bake my-font.ttf --output my-font-jittered.ttf
 ```
 
-**Current limitations** (phase A):
-- Input must be TTF. OTF/CFF fonts are not yet supported.
-- Uses the `rand` OpenType feature, which is not honored by most browser CSS rendering paths. A `calt`-based fallback is planned for phase B.
+**Current limitations**:
+- Output is always TTF (glyf). OTF/CFF inputs are converted to quadratic outlines.
 
 ## Installation
 
@@ -63,8 +62,8 @@ jitter bake <INPUT> [--output <FILE>] [--alternates <N>] [--intensity <0.0-1.0>]
 
 1. ~~render mode (text + font -> SVG with per-character variation)~~ ✓
 2. ~~bake mode phase A (TTF + `rand` feature)~~ ✓
-3. bake mode phase B (calt-based fallback for wider renderer support)
-4. bake mode phase C (OTF/CFF support)
+3. ~~bake mode phase B (calt-based fallback for wider renderer support)~~ ✓
+4. ~~bake mode phase C (OTF/CFF support)~~ ✓
 5. my-font-craft integration (use jitter as a post-processing step)
 
 ## License

@@ -30,10 +30,10 @@ An optional `--seed <u64>` parameter makes output reproducible: the same text, f
 
 ### bake mode
 
-Input: TTF font file (.ttf)
-Output: modified TTF with OpenType `rand` feature (phase A; `calt` planned for phase B)
+Input: TTF or OTF font file (.ttf/.otf)
+Output: modified TTF with OpenType `calt` feature
 
-Instead of rendering text to an image, bake mode modifies the font itself. For each glyph, it generates N alternate versions with baked-in transformations. Phase A emits a GSUB `rand` feature (AlternateSubstFormat1) so any renderer that honors `rand` (HarfBuzz, CoreText, DirectWrite) cycles through the alternates. Phase B will add a `calt`-based cycling fallback for broader browser support, and phase C will add OTF/CFF input support.
+Instead of rendering text to an image, bake mode modifies the font itself. For each glyph, it generates N alternate versions with baked-in transformations. The output uses a GSUB `calt` feature (ChainContextSubst + SingleSubst) so any renderer that honors contextual alternates cycles through the alternates for consecutive identical glyphs. OTF/CFF inputs are converted to quadratic outlines (cubic→quad approximation at 0.5 font units, generally imperceptible to the eye).
 
 ## Differentiation
 
@@ -55,28 +55,27 @@ CLI (clap)
 │   ├── jitter.rs — Per-character random transforms (rotation, scale, offset)
 │   ├── svg.rs — SVG output (font coords → SVG coords, path generation)
 │   └── png.rs — PNG output (tiny-skia rasterizer, transparent background)
-└── bake: TTF -> TTF (phase A: `rand` feature)
+└── bake: TTF/OTF -> TTF (`calt` feature)
     └── bake.rs
-        ├── TTF detection (reject CFF/CFF2)
+        ├── Outline extraction via skrifa (TTF quad or OTF cubic)
+        ├── Cubic→quadratic conversion via kurbo::CubicBez::to_quads (0.5 font units)
         ├── Glyph duplication via jitter::apply_jitter + kurbo::BezPath
         ├── glyf/loca rebuild with write-fonts GlyfLocaBuilder
         ├── maxp / hhea / hmtx update (num_glyphs += alternates)
-        ├── GSUB: rand feature + AlternateSubstFormat1
+        ├── GSUB: calt feature + ChainContextSubst + SingleSubstFormat2
         ├── post downgraded to format 3.0 (no glyph names, count-consistent)
         └── Pass-through copy of cmap, name, OS/2, head via FontBuilder
 ```
 
-### bake mode phase A limitations
+### bake mode limitations
 
-- Input: TTF only (OTF/CFF blocked). CFF/CFF2 tables cause an explicit error.
+- Input: TTF or OTF (CFF/CFF2 accepted; cubic outlines are converted to quadratic).
+- Output: always TTF (glyf table).
 - `.notdef` (gid 0) is preserved unchanged and excluded from alternates.
 - Composite glyphs are consumed via skrifa's pen and re-emitted as flat simple
   glyphs in the output (structure flattened, visual appearance preserved).
-- Cubic-bearing glyphs (non-TrueType outlines surfaced by skrifa) are passed
-  through without alternates; a warning is logged.
-- GSUB emits a single `rand` feature under script=DFLT, langsys=default.
-  Browser support for `rand` is limited; Phase B will add a `calt` cycling
-  fallback.
+- GSUB emits a `calt` feature under script=DFLT, langsys=default.
+  Consecutive identical glyphs cycle through their alternates.
 
 ## Future integration
 

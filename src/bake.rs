@@ -138,7 +138,7 @@ pub fn bake_font(
 
     // Originals pass: build Glyph + LongMetric for each gid.
     for (gid, orig) in originals.iter().enumerate() {
-        let glyph = build_simple_glyph(&orig.commands)?;
+        let glyph = build_simple_glyph(&orig.commands, gid as u16)?;
         new_glyphs.push(glyph);
 
         let (advance, lsb) = resolve_original_hmtx(&original_hmtx, gid, num_long_metrics);
@@ -169,7 +169,7 @@ pub fn bake_font(
             // Run jitter once per alternate to get a fresh variation.
             let jittered = jitter::apply_jitter_one(&orig.commands, intensity, units_per_em);
 
-            let glyph = build_simple_glyph(&jittered)?;
+            let glyph = build_simple_glyph(&jittered, next_gid as u16)?;
             new_glyphs.push(glyph);
             // Alternate inherits the advance width of its origin.
             let advance = new_metrics[gid].advance;
@@ -383,12 +383,13 @@ impl OutlinePen for CollectPen {
 /// kurbo. Empty commands -> empty glyph (glyf allows zero-length entries).
 /// Cubic Bézier segments are approximated as quadratic curves so the result
 /// is always valid for the TrueType `glyf` table.
-fn build_simple_glyph(commands: &[PathCommand]) -> Result<Glyph, String> {
+fn build_simple_glyph(commands: &[PathCommand], gid: u16) -> Result<Glyph, String> {
     if commands.is_empty() {
         return Ok(Glyph::Empty);
     }
 
     let mut path = BezPath::new();
+    let mut has_cubic = false;
     for cmd in commands {
         match *cmd {
             PathCommand::MoveTo(x, y) => path.move_to((x as f64, y as f64)),
@@ -396,20 +397,30 @@ fn build_simple_glyph(commands: &[PathCommand]) -> Result<Glyph, String> {
             PathCommand::QuadTo(cx, cy, x, y) => {
                 path.quad_to((cx as f64, cy as f64), (x as f64, y as f64))
             }
-            PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => path.curve_to(
-                (cx0 as f64, cy0 as f64),
-                (cx1 as f64, cy1 as f64),
-                (x as f64, y as f64),
-            ),
+            PathCommand::CurveTo(cx0, cy0, cx1, cy1, x, y) => {
+                has_cubic = true;
+                path.curve_to(
+                    (cx0 as f64, cy0 as f64),
+                    (cx1 as f64, cy1 as f64),
+                    (x as f64, y as f64),
+                );
+            }
             PathCommand::Close => path.close_path(),
         }
     }
 
-    let quad_path = cubic_to_quadratic(&path, 0.5);
+    let final_path = if has_cubic {
+        cubic_to_quadratic(&path, 0.5)
+    } else {
+        path
+    };
 
-    match SimpleGlyph::from_bezpath(&quad_path) {
+    match SimpleGlyph::from_bezpath(&final_path) {
         Ok(g) => Ok(Glyph::Simple(g)),
-        Err(_) => Ok(Glyph::Empty),
+        Err(_) => {
+            eprintln!("warning: glyph {gid} produced an invalid outline and was emitted as empty");
+            Ok(Glyph::Empty)
+        }
     }
 }
 
@@ -608,5 +619,26 @@ mod tests {
         };
         let maxp = font.maxp().expect("maxp");
         assert!(maxp.num_glyphs() > 0);
+    }
+
+    #[test]
+    fn build_simple_glyph_with_cubic_produces_simple() {
+        // A minimal cubic Bézier path that should convert to quadratic and produce a SimpleGlyph.
+        let commands = vec![
+            PathCommand::MoveTo(0.0, 0.0),
+            PathCommand::CurveTo(10.0, 0.0, 20.0, 10.0, 30.0, 10.0),
+            PathCommand::Close,
+        ];
+        let result = build_simple_glyph(&commands, 1).unwrap();
+        assert!(
+            matches!(result, Glyph::Simple(_)),
+            "cubic commands should be approximated to quadratic and produce SimpleGlyph"
+        );
+    }
+
+    #[test]
+    fn build_simple_glyph_empty_returns_empty() {
+        let result = build_simple_glyph(&[], 0).unwrap();
+        assert!(matches!(result, Glyph::Empty));
     }
 }
