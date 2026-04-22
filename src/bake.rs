@@ -33,7 +33,7 @@ use skrifa::outline::OutlinePen;
 use skrifa::raw::{FileRef, TableProvider as SkrifaTableProvider};
 use skrifa::{GlyphId, MetadataProvider};
 use std::path::Path;
-use write_fonts::read::types::Tag;
+use write_fonts::read::types::{GlyphId16, Tag};
 use write_fonts::read::{FontRead, FontRef as WfFontRef};
 use write_fonts::tables::glyf::{GlyfLocaBuilder, Glyph, SimpleGlyph};
 use write_fonts::tables::gsub::{Gsub, SingleSubst, SubstitutionLookup};
@@ -150,7 +150,7 @@ pub fn bake_font(
     }
 
     // Compose the glyph list: originals first, then append alternates.
-    // Track alternate gids per origin so we can build the GSUB Alternate
+    // Track alternate gids per origin so we can build the GSUB calt
     // substitution afterwards.
     let mut alt_map: Vec<Vec<u16>> = vec![Vec::new(); num_glyphs as usize];
     let mut new_glyphs: Vec<Glyph> = Vec::with_capacity(num_glyphs as usize);
@@ -510,8 +510,6 @@ fn resolve_original_hmtx(
 ///   backtrack=[alt_{N-2}] → SingleSubst_{N-1} (origin→alt_{N-1})
 ///   backtrack=[alt_{N-1}] → SingleSubst_0 (origin→alt_0)  (cycle)
 fn build_gsub_calt(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
-    use write_fonts::read::types::GlyphId16;
-
     // Collect (origin_gid, alternates) pairs, sorted by gid so lookups
     // are built in a stable, deterministic order.
     let mut pairs: Vec<(u16, &Vec<u16>)> = alt_map
@@ -643,6 +641,19 @@ mod tests {
             Tag::new(b"calt")
         );
         assert_eq!(g.lookup_list.lookups.len(), 3);
+    }
+
+    #[test]
+    fn build_gsub_calt_with_single_alt() {
+        // N = 1: 1 SingleSubst + 1 ChainContextSubst (2 rules: origin→alt, alt→alt cycle).
+        let mut map = vec![Vec::new(); 5];
+        map[1] = vec![3];
+        let g = build_gsub_calt(&map).unwrap();
+        assert_eq!(
+            g.feature_list.feature_records[0].feature_tag,
+            Tag::new(b"calt")
+        );
+        assert_eq!(g.lookup_list.lookups.len(), 2);
     }
 
     #[cfg(target_os = "macos")]
