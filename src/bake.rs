@@ -1,10 +1,11 @@
-//! Bake mode: generate a new TTF with alternate glyphs and a GSUB `rand` feature.
+//! Bake mode: generate a new TTF with alternate glyphs and a GSUB `calt` feature.
 //!
-//! Phase A scope:
+//! Phase B scope:
 //! - Input is TTF only (OTF / CFF / CFF2 is rejected).
 //! - For each non-empty simple glyph (excluding `.notdef`), N alternates are
 //!   created by re-running jitter, then registered in a minimal GSUB table
-//!   using the `rand` feature (OpenType 1.8) with AlternateSubstFormat1.
+//!   using the `calt` feature (Contextual Alternates) with ChainContextSubst
+//!   (LookupType 6, Format 1) and SingleSubstFormat2 lookups.
 //! - `.notdef` (gid 0) is preserved unchanged and excluded from alternates.
 //! - Composite glyphs are consumed via skrifa's pen and re-emitted as flat
 //!   simple glyphs (structure flattened, visual appearance preserved).
@@ -15,10 +16,9 @@
 //!   verbatim. `post` is downgraded to format 3.0 because the glyph count
 //!   changed and the original format 2 glyph-name index would be stale.
 //!
-//! Shapers that honour the `rand` feature will pick a random alternate each
-//! time the glyph is laid out, producing the handwriting-like variation baked
-//! into the font itself. calt / contextual alternates are out of scope here
-//! and tracked as a follow-up.
+//! Shapers that honour the `calt` feature will cycle through alternates for
+//! consecutive identical glyphs, producing the handwriting-like variation
+//! baked into the font itself.
 //!
 //! Compatibility note: `skrifa 0.26` uses `read-fonts 0.25`, while
 //! `write-fonts 0.31` uses `read-fonts 0.24`. Both are in the dependency graph.
@@ -36,13 +36,14 @@ use std::path::Path;
 use write_fonts::read::types::Tag;
 use write_fonts::read::{FontRead, FontRef as WfFontRef};
 use write_fonts::tables::glyf::{GlyfLocaBuilder, Glyph, SimpleGlyph};
-use write_fonts::tables::gsub::{AlternateSet, AlternateSubstFormat1, Gsub, SubstitutionLookup};
+use write_fonts::tables::gsub::{Gsub, SingleSubst, SubstitutionLookup};
 use write_fonts::tables::head::Head;
 use write_fonts::tables::hhea::Hhea;
 use write_fonts::tables::hmtx::{Hmtx, LongMetric};
 use write_fonts::tables::layout::{
-    CoverageFormat1, CoverageTable, Feature, FeatureList, FeatureRecord, LangSys, Lookup,
-    LookupFlag, LookupList, Script, ScriptList, ScriptRecord,
+    ChainedSequenceContext, ChainedSequenceRule, ChainedSequenceRuleSet, CoverageFormat1,
+    CoverageTable, Feature, FeatureList, FeatureRecord, LangSys, Lookup, LookupFlag, LookupList,
+    Script, ScriptList, ScriptRecord, SequenceLookupRecord,
 };
 use write_fonts::tables::maxp::Maxp;
 use write_fonts::tables::post::Post;
@@ -52,7 +53,7 @@ use write_fonts::FontBuilder;
 /// Bake jitter variation into a font file.
 ///
 /// Reads the TTF at `input_path`, generates `alternates` jittered variants per
-/// glyph, and writes a new TTF with the `rand` GSUB feature to `output_path`.
+/// glyph, and writes a new TTF with the `calt` GSUB feature to `output_path`.
 pub fn bake_font(
     input_path: &Path,
     output_path: &Path,
@@ -272,8 +273,9 @@ pub fn bake_font(
     // 3.0 stores no glyph names, so it is always consistent.
     let post = build_post_v3(&wf_font)?;
 
-    // Build a minimal GSUB: script DFLT / langsys dflt / feature rand / AlternateSubst lookup.
-    let gsub = build_gsub(&alt_map)?;
+    // Build a minimal GSUB: script DFLT / langsys dflt / feature calt /
+    // ChainContextSubst + SingleSubst lookups.
+    let gsub = build_gsub_calt(&alt_map)?;
 
     // Assemble the FontBuilder. We add the rebuilt tables first, then call
     // `copy_missing_tables` — which only inserts tables we haven't added — so
@@ -492,11 +494,26 @@ fn resolve_original_hmtx(
     }
 }
 
-/// Build a minimal GSUB table exposing `rand` feature backed by one
-/// AlternateSubst lookup that covers every glyph with generated alternates.
-fn build_gsub(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
-    // Collect (origin_gid, alternates) pairs, sorted by gid so the coverage
-    // array is in numerical order as required by CoverageFormat1.
+/// Build a minimal GSUB table exposing `calt` feature backed by
+/// ChainContextSubst lookups that cycle through alternates for consecutive
+/// identical glyphs.
+///
+/// For each origin with N alternates, we create:
+/// - N SingleSubst lookups: origin → alt_k (k = 0..N-1)
+/// - 1 ChainContextSubst lookup: Coverage=[origin], with N+1 rules that
+///   check the backtrack glyph and apply the appropriate SingleSubst.
+///
+/// Chain rules:
+///   backtrack=[origin] → SingleSubst_0 (origin→alt_0)
+///   backtrack=[alt_0]  → SingleSubst_1 (origin→alt_1)
+///   ...
+///   backtrack=[alt_{N-2}] → SingleSubst_{N-1} (origin→alt_{N-1})
+///   backtrack=[alt_{N-1}] → SingleSubst_0 (origin→alt_0)  (cycle)
+fn build_gsub_calt(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
+    use write_fonts::read::types::GlyphId16;
+
+    // Collect (origin_gid, alternates) pairs, sorted by gid so lookups
+    // are built in a stable, deterministic order.
     let mut pairs: Vec<(u16, &Vec<u16>)> = alt_map
         .iter()
         .enumerate()
@@ -521,35 +538,76 @@ fn build_gsub(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
         return Ok(Gsub::new(script_list, feature_list, lookup_list));
     }
 
-    let coverage_glyphs: Vec<write_fonts::read::types::GlyphId16> = pairs
-        .iter()
-        .map(|(gid, _)| write_fonts::read::types::GlyphId16::new(*gid))
-        .collect();
-    let coverage = CoverageTable::Format1(CoverageFormat1::new(coverage_glyphs));
+    let mut lookups: Vec<SubstitutionLookup> = Vec::new();
+    let mut feature_lookup_indices: Vec<u16> = Vec::new();
 
-    let alt_sets: Vec<AlternateSet> = pairs
-        .iter()
-        .map(|(_, alts)| {
-            AlternateSet::new(
-                alts.iter()
-                    .map(|gid| write_fonts::read::types::GlyphId16::new(*gid))
-                    .collect(),
-            )
-        })
-        .collect();
+    for (origin_gid, alts) in &pairs {
+        let num_alts = alts.len();
+        if num_alts == 0 {
+            continue;
+        }
 
-    let alt_subst = AlternateSubstFormat1::new(coverage, alt_sets);
-    let lookup = Lookup::new(LookupFlag::empty(), vec![alt_subst]);
-    let subst_lookup = SubstitutionLookup::Alternate(lookup);
-    let lookup_list: LookupList<SubstitutionLookup> = LookupList::new(vec![subst_lookup]);
+        // Base index in the global LookupList for this origin's SingleSubst lookups.
+        let base_lookup_idx = lookups.len() as u16;
 
-    let feature = Feature::new(None, vec![0]);
-    let feature_record = FeatureRecord::new(Tag::new(b"rand"), feature);
+        // Create N SingleSubst lookups: origin → alt_k
+        for alt_gid in alts.iter() {
+            let coverage =
+                CoverageTable::Format1(CoverageFormat1::new(vec![GlyphId16::new(*origin_gid)]));
+            let subst = SingleSubst::format_2(coverage, vec![GlyphId16::new(*alt_gid)]);
+            let lookup = Lookup::new(LookupFlag::empty(), vec![subst]);
+            lookups.push(SubstitutionLookup::Single(lookup));
+        }
+
+        // Create 1 ChainContextSubst lookup for this origin.
+        let coverage =
+            CoverageTable::Format1(CoverageFormat1::new(vec![GlyphId16::new(*origin_gid)]));
+
+        let mut rules: Vec<ChainedSequenceRule> = Vec::with_capacity(num_alts + 1);
+
+        // Rule 0: previous glyph is origin → apply SingleSubst_0 (origin→alt_0)
+        rules.push(ChainedSequenceRule::new(
+            vec![GlyphId16::new(*origin_gid)],
+            vec![],
+            vec![],
+            vec![SequenceLookupRecord::new(0, base_lookup_idx)],
+        ));
+
+        // Rules 1..N-1: previous glyph is alt_{k-1} → apply SingleSubst_k
+        for k in 1..num_alts {
+            rules.push(ChainedSequenceRule::new(
+                vec![GlyphId16::new(alts[k - 1])],
+                vec![],
+                vec![],
+                vec![SequenceLookupRecord::new(0, base_lookup_idx + k as u16)],
+            ));
+        }
+
+        // Rule N: previous glyph is alt_{N-1} → apply SingleSubst_0 (cycle back)
+        rules.push(ChainedSequenceRule::new(
+            vec![GlyphId16::new(alts[num_alts - 1])],
+            vec![],
+            vec![],
+            vec![SequenceLookupRecord::new(0, base_lookup_idx)],
+        ));
+
+        let rule_set = ChainedSequenceRuleSet::new(rules);
+        let chain_context = ChainedSequenceContext::format_1(coverage, vec![Some(rule_set)]);
+        let chain_lookup = Lookup::new(LookupFlag::empty(), vec![chain_context.into()]);
+        let chain_lookup_idx = lookups.len() as u16;
+        lookups.push(SubstitutionLookup::ChainContextual(chain_lookup));
+        feature_lookup_indices.push(chain_lookup_idx);
+    }
+
+    let feature = Feature::new(None, feature_lookup_indices);
+    let feature_record = FeatureRecord::new(Tag::new(b"calt"), feature);
     let feature_list = FeatureList::new(vec![feature_record]);
 
     let lang_sys = LangSys::new(vec![0]);
     let script = Script::new(Some(lang_sys), vec![]);
     let script_list = ScriptList::new(vec![ScriptRecord::new(Tag::new(b"DFLT"), script)]);
+
+    let lookup_list = LookupList::new(lookups);
 
     Ok(Gsub::new(script_list, feature_list, lookup_list))
 }
@@ -565,8 +623,8 @@ mod tests {
     }
 
     #[test]
-    fn build_gsub_handles_empty() {
-        let g = build_gsub(&[vec![], vec![]]).unwrap();
+    fn build_gsub_calt_handles_empty() {
+        let g = build_gsub_calt(&[vec![], vec![]]).unwrap();
         // Script DFLT present, feature list empty, lookup list empty.
         assert_eq!(g.script_list.script_records.len(), 1);
         assert_eq!(g.feature_list.feature_records.len(), 0);
@@ -574,16 +632,17 @@ mod tests {
     }
 
     #[test]
-    fn build_gsub_with_one_alt_roundtrips() {
-        // gid 1 has alternates 3 and 4.
+    fn build_gsub_calt_with_one_alt_roundtrips() {
+        // gid 1 has alternates 3 and 4 (N = 2).
+        // Expect 2 SingleSubst + 1 ChainContextSubst = 3 lookups.
         let mut map = vec![Vec::new(); 5];
         map[1] = vec![3, 4];
-        let g = build_gsub(&map).unwrap();
+        let g = build_gsub_calt(&map).unwrap();
         assert_eq!(
             g.feature_list.feature_records[0].feature_tag,
-            Tag::new(b"rand")
+            Tag::new(b"calt")
         );
-        assert_eq!(g.lookup_list.lookups.len(), 1);
+        assert_eq!(g.lookup_list.lookups.len(), 3);
     }
 
     #[cfg(target_os = "macos")]
