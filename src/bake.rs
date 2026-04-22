@@ -20,8 +20,6 @@
 //! consecutive identical glyphs, producing the handwriting-like variation
 //! baked into the font itself.
 //!
-//! Compatibility note: `skrifa 0.26` uses `read-fonts 0.25`, while
-//! `write-fonts 0.31` uses `read-fonts 0.24`. Both are in the dependency graph.
 //! We use skrifa to read the font for outline extraction, and parse the same
 //! bytes again through `write_fonts::read` to hand to `FontBuilder`.
 
@@ -163,16 +161,13 @@ pub fn bake_font(
         .ok_or_else(|| "Font is missing 'hhea' table".to_string())?;
     let hhea_ro = write_fonts::read::tables::hhea::Hhea::read(hhea_bytes_ro)
         .map_err(|e| format!("Failed to read hhea: {e}"))?;
-    let num_long_metrics = hhea_ro.number_of_long_metrics() as usize;
+    let num_long_metrics = hhea_ro.number_of_h_metrics() as usize;
     let hmtx_bytes_ro = wf_font
         .table_data(Tag::new(b"hmtx"))
         .ok_or_else(|| "Font is missing 'hmtx' table".to_string())?;
-    let original_hmtx = write_fonts::read::tables::hmtx::Hmtx::read(
-        hmtx_bytes_ro,
-        num_long_metrics as u16,
-        num_glyphs,
-    )
-    .map_err(|e| format!("Failed to read hmtx: {e}"))?;
+    let original_hmtx =
+        write_fonts::read::tables::hmtx::Hmtx::read(hmtx_bytes_ro, num_long_metrics as u16)
+            .map_err(|e| format!("Failed to read hmtx: {e}"))?;
 
     // Originals pass: build Glyph + LongMetric for each gid.
     // For cubic-bearing (is_simple=false) glyphs we still emit a placeholder
@@ -263,7 +258,7 @@ pub fn bake_font(
         .table_data(Tag::new(b"hhea"))
         .ok_or_else(|| "Font is missing 'hhea' table".to_string())?;
     let mut hhea = Hhea::read(hhea_bytes).map_err(|e| format!("Failed to own hhea: {e}"))?;
-    hhea.number_of_long_metrics = total_glyphs_u16;
+    hhea.number_of_h_metrics = total_glyphs_u16;
 
     let hmtx = Hmtx::new(new_metrics, Vec::new());
 
@@ -345,10 +340,10 @@ fn verify_baked_font(data: &[u8], expected_num_glyphs: u16) -> Result<(), String
     let hhea = font
         .hhea()
         .map_err(|e| format!("bake produced font whose hhea is unreadable: {e}"))?;
-    let num_long_metrics = hhea.number_of_long_metrics();
-    if num_long_metrics != expected_num_glyphs {
+    let num_h_metrics = hhea.number_of_h_metrics();
+    if num_h_metrics != expected_num_glyphs {
         return Err(format!(
-            "bake produced inconsistent font: hhea.number_of_long_metrics={num_long_metrics}, expected {expected_num_glyphs}"
+            "bake produced inconsistent font: hhea.number_of_h_metrics={num_h_metrics}, expected {expected_num_glyphs}"
         ));
     }
 

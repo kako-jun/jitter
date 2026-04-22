@@ -12,19 +12,16 @@ readme = "README.md"
 keywords = ["font", "text", "glyph", "handwriting", "jitter"]
 categories = ["command-line-utilities", "graphics"]
 exclude = [".github/", "target/"]
-rust-version = "1.78.0"
+rust-version = "1.85.0"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-skrifa = "0.26"
+skrifa = "0.42"
 rand = "0.8"
 rand_chacha = "0.3"
 tiny-skia = "0.11"
-# Pinned: write-fonts 0.31 uses read-fonts 0.24, which coexists with
-# skrifa 0.26's read-fonts 0.25. Newer write-fonts (0.32+) shifts
-# the read-fonts dep and breaks the two-parse pattern in src/bake.rs.
-write-fonts = { version = "=0.31.0", features = ["read"] }
-kurbo = "0.11"
+write-fonts = { version = "0.48", features = ["read"] }
+kurbo = "0.13"
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
