@@ -33,7 +33,7 @@ An optional `--seed <u64>` parameter makes output reproducible: the same text, f
 Input: TTF or OTF font file (.ttf/.otf)
 Output: modified TTF with OpenType `calt` feature
 
-Instead of rendering text to an image, bake mode modifies the font itself. For each glyph, it generates N alternate versions with baked-in transformations. The output uses a GSUB `calt` feature (ChainContextSubst + SingleSubst) so any renderer that honors contextual alternates cycles through the alternates for consecutive identical glyphs. OTF/CFF inputs are converted to quadratic outlines (cubic→quad approximation at 0.5 font units, generally imperceptible to the eye).
+Instead of rendering text to an image, bake mode modifies the font itself. For each glyph, it generates N alternate versions with baked-in transformations. The output uses a GSUB `calt` feature (ChainContextSubst + SingleSubst) so renderers that honor contextual alternates can cycle through alternates for consecutive identical glyphs. OTF/CFF inputs are converted to quadratic outlines (cubic→quad approximation at 0.5 font units, generally imperceptible to the eye).
 
 ## Differentiation
 

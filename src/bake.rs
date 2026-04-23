@@ -1,4 +1,4 @@
-//! Bake mode: generate a new TTF with alternate glyphs and a GSUB `rand` feature.
+//! Bake mode: generate a new TTF with alternate glyphs and a GSUB `calt` feature.
 //!
 //! Phase C scope:
 //! - Input is TTF or OTF (CFF / CFF2). Output is always TTF (glyf/loca).
@@ -6,7 +6,8 @@
 //!   curves so they can be stored in the TrueType `glyf` table.
 //! - For each non-empty simple glyph (excluding `.notdef`), N alternates are
 //!   created by re-running jitter, then registered in a minimal GSUB table
-//!   using the `rand` feature (OpenType 1.8) with AlternateSubstFormat1.
+//!   using the `calt` feature (Contextual Alternates) with ChainContextSubst
+//!   (LookupType 6, Format 1) and SingleSubst lookups.
 //! - `.notdef` (gid 0) is preserved unchanged and excluded from alternates.
 //! - Composite glyphs are consumed via skrifa's pen and re-emitted as flat
 //!   simple glyphs (structure flattened, visual appearance preserved).
@@ -14,15 +15,9 @@
 //!   verbatim. `post` is downgraded to format 3.0 because the glyph count
 //!   changed and the original format 2 glyph-name index would be stale.
 //!
-//! Shapers that honour the `rand` feature will pick a random alternate each
-//! time the glyph is laid out, producing the handwriting-like variation baked
-//! into the font itself. calt / contextual alternates are out of scope here
-//! and tracked as a follow-up.
-//!
-//! Compatibility note: `skrifa 0.26` uses `read-fonts 0.25`, while
-//! `write-fonts 0.31` uses `read-fonts 0.24`. Both are in the dependency graph.
-//! We use skrifa to read the font for outline extraction, and parse the same
-//! bytes again through `write_fonts::read` to hand to `FontBuilder`.
+//! Shapers that honour the `calt` feature will cycle through alternates for
+//! consecutive identical glyphs, producing the handwriting-like variation
+//! baked into the font itself.
 
 use crate::font::PathCommand;
 use crate::jitter;
@@ -35,13 +30,14 @@ use std::path::Path;
 use write_fonts::read::types::Tag;
 use write_fonts::read::{FontRead, FontRef as WfFontRef};
 use write_fonts::tables::glyf::{GlyfLocaBuilder, Glyph, SimpleGlyph};
-use write_fonts::tables::gsub::{AlternateSet, AlternateSubstFormat1, Gsub, SubstitutionLookup};
+use write_fonts::tables::gsub::{Gsub, SingleSubst, SubstitutionLookup};
 use write_fonts::tables::head::Head;
 use write_fonts::tables::hhea::Hhea;
 use write_fonts::tables::hmtx::{Hmtx, LongMetric};
 use write_fonts::tables::layout::{
-    CoverageFormat1, CoverageTable, Feature, FeatureList, FeatureRecord, LangSys, Lookup,
-    LookupFlag, LookupList, Script, ScriptList, ScriptRecord,
+    ChainedClassSequenceRule, ChainedClassSequenceRuleSet, ChainedSequenceContext, CoverageFormat1,
+    CoverageTable, Feature, FeatureList, FeatureRecord, LangSys, Lookup, LookupFlag, LookupList,
+    Script, ScriptList, ScriptRecord, SequenceLookupRecord,
 };
 use write_fonts::tables::maxp::Maxp;
 use write_fonts::tables::post::Post;
@@ -50,8 +46,8 @@ use write_fonts::FontBuilder;
 
 /// Bake jitter variation into a font file.
 ///
-/// Reads the TTF at `input_path`, generates `alternates` jittered variants per
-/// glyph, and writes a new TTF with the `rand` GSUB feature to `output_path`.
+/// Reads the font at `input_path`, generates `alternates` jittered variants per
+/// glyph, and writes a new TTF with the `calt` GSUB feature to `output_path`.
 pub fn bake_font(
     input_path: &Path,
     output_path: &Path,
@@ -230,8 +226,9 @@ pub fn bake_font(
     // 3.0 stores no glyph names, so it is always consistent.
     let post = build_post_v3(&wf_font)?;
 
-    // Build a minimal GSUB: script DFLT / langsys dflt / feature rand / AlternateSubst lookup.
-    let gsub = build_gsub(&alt_map)?;
+    // Build a minimal GSUB: script DFLT / langsys dflt / feature calt /
+    // ChainContextSubst + SingleSubst lookups.
+    let gsub = build_gsub_calt(&alt_map)?;
 
     // Assemble the FontBuilder. We add the rebuilt tables first, then call
     // `copy_missing_tables` — which only inserts tables we haven't added — so
@@ -487,11 +484,18 @@ fn resolve_original_hmtx(
     }
 }
 
-/// Build a minimal GSUB table exposing `rand` feature backed by one
-/// AlternateSubst lookup that covers every glyph with generated alternates.
-fn build_gsub(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
-    // Collect (origin_gid, alternates) pairs, sorted by gid so the coverage
-    // array is in numerical order as required by CoverageFormat1.
+/// Build a compact GSUB table exposing `calt` backed by one shared
+/// ChainContextSubst lookup and one SingleSubst lookup per alternate stage.
+///
+/// This keeps the number of lookups proportional to `max_alternates` instead
+/// of `glyph_count * alternates`, which avoids GSUB table overflows on larger
+/// fonts while still cycling repeated identical glyphs.
+fn build_gsub_calt(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
+    use write_fonts::read::types::GlyphId16;
+    const CHAIN_CHUNK_SIZE: usize = 192;
+
+    // Collect (origin_gid, alternates) pairs, sorted by gid so lookups
+    // are built in a stable, deterministic order.
     let mut pairs: Vec<(u16, &Vec<u16>)> = alt_map
         .iter()
         .enumerate()
@@ -516,37 +520,119 @@ fn build_gsub(alt_map: &[Vec<u16>]) -> Result<Gsub, String> {
         return Ok(Gsub::new(script_list, feature_list, lookup_list));
     }
 
-    let coverage_glyphs: Vec<write_fonts::read::types::GlyphId16> = pairs
-        .iter()
-        .map(|(gid, _)| write_fonts::read::types::GlyphId16::new(*gid))
-        .collect();
-    let coverage = CoverageTable::Format1(CoverageFormat1::new(coverage_glyphs));
+    let max_alts = pairs.iter().map(|(_, alts)| alts.len()).max().unwrap_or(0);
+    let mut lookups: Vec<SubstitutionLookup> = Vec::with_capacity(max_alts + 1);
 
-    let alt_sets: Vec<AlternateSet> = pairs
-        .iter()
-        .map(|(_, alts)| {
-            AlternateSet::new(
-                alts.iter()
-                    .map(|gid| write_fonts::read::types::GlyphId16::new(*gid))
-                    .collect(),
-            )
-        })
-        .collect();
+    for stage in 0..max_alts {
+        let mut coverage_glyphs = Vec::new();
+        let mut replacements = Vec::new();
+        for (origin_gid, alts) in &pairs {
+            if let Some(&alt_gid) = alts.get(stage) {
+                coverage_glyphs.push(GlyphId16::new(*origin_gid));
+                replacements.push(GlyphId16::new(alt_gid));
+            }
+        }
+        let coverage = CoverageTable::Format1(CoverageFormat1::new(coverage_glyphs));
+        let subst = SingleSubst::format_2(coverage, replacements);
+        let lookup = Lookup::new(LookupFlag::empty(), vec![subst]);
+        lookups.push(SubstitutionLookup::Single(lookup));
+    }
 
-    let alt_subst = AlternateSubstFormat1::new(coverage, alt_sets);
-    let lookup = Lookup::new(LookupFlag::empty(), vec![alt_subst]);
-    let subst_lookup = SubstitutionLookup::Alternate(lookup);
-    let lookup_list: LookupList<SubstitutionLookup> = LookupList::new(vec![subst_lookup]);
+    let mut feature_lookup_indices = Vec::new();
+    for chunk in pairs.chunks(CHAIN_CHUNK_SIZE) {
+        let chain_lookup_idx = lookups.len() as u16;
+        lookups.push(SubstitutionLookup::ChainContextual(Lookup::new(
+            LookupFlag::empty(),
+            vec![build_chain_subtable_for_chunk(chunk).into()],
+        )));
+        feature_lookup_indices.push(chain_lookup_idx);
+    }
 
-    let feature = Feature::new(None, vec![0]);
-    let feature_record = FeatureRecord::new(Tag::new(b"rand"), feature);
+    let feature = Feature::new(None, feature_lookup_indices);
+    let feature_record = FeatureRecord::new(Tag::new(b"calt"), feature);
     let feature_list = FeatureList::new(vec![feature_record]);
 
     let lang_sys = LangSys::new(vec![0]);
     let script = Script::new(Some(lang_sys), vec![]);
     let script_list = ScriptList::new(vec![ScriptRecord::new(Tag::new(b"DFLT"), script)]);
 
+    let lookup_list = LookupList::new(lookups);
     Ok(Gsub::new(script_list, feature_list, lookup_list))
+}
+
+fn build_chain_subtable_for_chunk(chunk: &[(u16, &Vec<u16>)]) -> ChainedSequenceContext {
+    use write_fonts::read::types::GlyphId16;
+
+    let mut input_class_items = Vec::new();
+    let mut backtrack_class_items = Vec::new();
+    let mut rule_sets = vec![None];
+    let mut next_input_class = 1u16;
+    let mut next_backtrack_class = 1u16;
+
+    for (origin_gid, alts) in chunk {
+        let input_class = next_input_class;
+        next_input_class += 1;
+        input_class_items.push((GlyphId16::new(*origin_gid), input_class));
+
+        let origin_backtrack_class = next_backtrack_class;
+        next_backtrack_class += 1;
+        backtrack_class_items.push((GlyphId16::new(*origin_gid), origin_backtrack_class));
+
+        let mut backtrack_classes = Vec::with_capacity(alts.len() + 1);
+        backtrack_classes.push(origin_backtrack_class);
+        for &alt_gid in alts.iter() {
+            let class_id = next_backtrack_class;
+            next_backtrack_class += 1;
+            backtrack_class_items.push((GlyphId16::new(alt_gid), class_id));
+            backtrack_classes.push(class_id);
+        }
+
+        let mut rules = Vec::with_capacity(alts.len() + 1);
+        rules.push(ChainedClassSequenceRule::new(
+            vec![backtrack_classes[0]],
+            vec![],
+            vec![],
+            vec![SequenceLookupRecord::new(0, 0)],
+        ));
+
+        for (stage, backtrack_class) in backtrack_classes
+            .iter()
+            .copied()
+            .enumerate()
+            .take(alts.len())
+            .skip(1)
+        {
+            rules.push(ChainedClassSequenceRule::new(
+                vec![backtrack_class],
+                vec![],
+                vec![],
+                vec![SequenceLookupRecord::new(0, stage as u16)],
+            ));
+        }
+
+        rules.push(ChainedClassSequenceRule::new(
+            vec![*backtrack_classes.last().unwrap_or(&origin_backtrack_class)],
+            vec![],
+            vec![],
+            vec![SequenceLookupRecord::new(0, 0)],
+        ));
+
+        rule_sets.push(Some(ChainedClassSequenceRuleSet::new(rules)));
+    }
+
+    let coverage = CoverageTable::Format1(CoverageFormat1::new(
+        chunk.iter().map(|(gid, _)| GlyphId16::new(*gid)).collect(),
+    ));
+    let input_class_def = input_class_items.into_iter().collect();
+    let backtrack_class_def = backtrack_class_items.into_iter().collect();
+    let lookahead_class_def = std::iter::empty::<(GlyphId16, u16)>().collect();
+    ChainedSequenceContext::format_2(
+        coverage,
+        backtrack_class_def,
+        input_class_def,
+        lookahead_class_def,
+        rule_sets,
+    )
 }
 
 #[cfg(test)]
@@ -554,8 +640,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_gsub_handles_empty() {
-        let g = build_gsub(&[vec![], vec![]]).unwrap();
+    fn build_gsub_calt_handles_empty() {
+        let g = build_gsub_calt(&[vec![], vec![]]).unwrap();
         // Script DFLT present, feature list empty, lookup list empty.
         assert_eq!(g.script_list.script_records.len(), 1);
         assert_eq!(g.feature_list.feature_records.len(), 0);
@@ -563,16 +649,27 @@ mod tests {
     }
 
     #[test]
-    fn build_gsub_with_one_alt_roundtrips() {
+    fn build_gsub_calt_uses_shared_stage_lookups() {
         // gid 1 has alternates 3 and 4.
         let mut map = vec![Vec::new(); 5];
         map[1] = vec![3, 4];
-        let g = build_gsub(&map).unwrap();
+        let g = build_gsub_calt(&map).unwrap();
         assert_eq!(
             g.feature_list.feature_records[0].feature_tag,
-            Tag::new(b"rand")
+            Tag::new(b"calt")
         );
-        assert_eq!(g.lookup_list.lookups.len(), 1);
+        // 2 SingleSubst + 1 ChainContextSubst.
+        assert_eq!(g.lookup_list.lookups.len(), 3);
+    }
+
+    #[test]
+    fn build_gsub_calt_reuses_stage_lookups_across_origins() {
+        let mut map = vec![Vec::new(); 8];
+        map[1] = vec![3, 4];
+        map[2] = vec![5, 6];
+        let g = build_gsub_calt(&map).unwrap();
+        // Still 2 SingleSubst stages + 1 shared ChainContextSubst.
+        assert_eq!(g.lookup_list.lookups.len(), 3);
     }
 
     #[cfg(target_os = "macos")]

@@ -44,12 +44,12 @@ enum Commands {
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
     },
-    /// Bake variation into a font file (generates calt alternates)
+    /// Bake variation into a font file (generates calt alternates in a TTF)
     Bake {
         /// Input font file (.ttf or .otf)
         input: PathBuf,
 
-        /// Output font file path
+        /// Output font file path (default: <input>-jittered.ttf)
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -79,6 +79,11 @@ fn parse_intensity(s: &str) -> Result<f64, String> {
     } else {
         Err(format!("intensity must be between 0.0 and 1.0, got {v}"))
     }
+}
+
+fn default_bake_output_path(input: &std::path::Path) -> PathBuf {
+    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("font");
+    input.with_file_name(format!("{stem}-jittered.ttf"))
 }
 
 fn main() {
@@ -169,11 +174,7 @@ fn main() {
             alternates,
             intensity,
         } => {
-            let output = output.unwrap_or_else(|| {
-                let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("font");
-                let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("ttf");
-                input.with_file_name(format!("{stem}-jittered.{ext}"))
-            });
+            let output = output.unwrap_or_else(|| default_bake_output_path(&input));
             println!(
                 "Baking {} with {} alternates (intensity: {}) -> {}",
                 input.display(),
@@ -187,5 +188,23 @@ fn main() {
             }
             println!("Wrote {}", output.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_bake_output_path;
+    use std::path::Path;
+
+    #[test]
+    fn default_bake_output_for_otf_still_uses_ttf_extension() {
+        let output = default_bake_output_path(Path::new("fonts/demo.otf"));
+        assert_eq!(output, Path::new("fonts/demo-jittered.ttf"));
+    }
+
+    #[test]
+    fn default_bake_output_for_ttf_keeps_ttf_extension() {
+        let output = default_bake_output_path(Path::new("fonts/demo.ttf"));
+        assert_eq!(output, Path::new("fonts/demo-jittered.ttf"));
     }
 }

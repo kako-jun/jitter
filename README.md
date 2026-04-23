@@ -21,17 +21,18 @@ jitter render "reproducible" --font my-font.ttf --seed 42
 
 ### bake
 
-Takes a TTF font and generates N variant glyphs per character, embedding them as an OpenType `rand` feature (alternate substitution). Text rendered with the output font in renderers that honor `rand` (HarfBuzz, CoreText, DirectWrite) will show naturally varied glyphs.
+Takes a TTF or OTF font and generates N variant glyphs per character, embedding them as an OpenType `calt` feature (contextual alternates). Text rendered with the output font in renderers that honor `calt` can cycle through alternates for consecutive identical glyphs, which makes browser and app support broader than `rand`-only GSUB.
 
 ```
 jitter bake my-font.ttf --alternates 4 --intensity 0.6
-jitter bake my-font.ttf --output my-font-jittered.ttf
+jitter bake my-font.otf --output my-font-jittered.ttf
 ```
 
 **Bake mode details**:
 - Input: TTF or OTF/CFF
 - Output: Always TTF (glyf format)
 - OTF/CFF inputs are converted to quadratic outlines to fit the TTF glyf table
+- GSUB uses `calt`, not `rand`, so repeated identical glyphs can rotate through alternates in browsers too
 
 ## Installation
 
