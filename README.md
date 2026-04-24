@@ -10,7 +10,7 @@ Digital fonts produce identical glyphs every time the same character appears. Re
 
 ### render
 
-Takes text and a font file, applies per-character random transformations (rotation, scale, offset), and outputs an SVG or PNG (auto-detected from the `--output` extension).
+Takes text and a font file, applies per-character random transformations (rotation, anisotropic scale, shear, position drift, subtle stroke-weight variation, and per-point shake), and outputs an SVG or PNG (auto-detected from the `--output` extension).
 
 ```
 jitter render "Hello, world!" --font my-font.ttf --output hello.svg
@@ -64,10 +64,12 @@ jitter bake <INPUT> [--output <FILE>] [--alternates <N>] [--intensity <0.0-1.0>]
 ## Roadmap
 
 1. ~~render mode (text + font -> SVG with per-character variation)~~ ✓
-2. ~~bake mode phase A (TTF + `rand` feature)~~ ✓
-3. ~~bake mode phase B (calt-based fallback for wider renderer support)~~ ✓
-4. ~~bake mode phase C (OTF/CFF support)~~ ✓
-5. my-font-craft integration (use jitter as a post-processing step)
+2. ~~stroke-weight variation for render mode~~ ✓
+3. ~~bake mode phase A (TTF + `rand` feature)~~ ✓
+4. ~~bake mode phase B (calt-based fallback for wider renderer support)~~ ✓
+5. ~~bake mode phase C (OTF/CFF support)~~ ✓
+6. line-ending extension / pen-lift exaggeration (future)
+7. my-font-craft integration (use jitter as a post-processing step)
 
 ## License
 

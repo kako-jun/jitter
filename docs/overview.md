@@ -20,9 +20,11 @@ Each character gets independent random variation in:
 - **Scale**: independent x/y scaling (e.g. 0.90x to 1.10x per axis)
 - **Shear**: mild slant along x/y (up to ±5°)
 - **Position offset**: vertical and horizontal drift
-- **Stroke weight**: subtle thickness variation (future)
+- **Stroke weight**: subtle contour-aware thickening / thinning
 
-On top of the per-glyph rigid transform, every bezier control point receives an independent small offset, producing subtle internal curve shake that makes the same character visibly different each time it appears.
+Stroke weight variation uses a lightweight contour offset: jitter picks one small thickness delta per glyph, then offsets each contour from its on-curve geometry. Nested contours are detected by containment, so inner counters thin or thicken in the opposite geometric direction from outer shells without merely scaling the whole outline. The offset is also clamped per contour so tiny counters do not collapse.
+
+On top of the per-glyph rigid transform and contour offset, every bezier control point receives an independent small offset, producing subtle internal curve shake that makes the same character visibly different each time it appears.
 
 The `intensity` parameter (0.0 to 1.0) controls how much variation is applied. At 0.0, output is identical to the original font. At 1.0, maximum variation is applied.
 
